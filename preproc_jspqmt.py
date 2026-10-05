@@ -228,14 +228,11 @@ img_qmt_den = nib.load(path_qmt_den)
 data_qmt_den = img_qmt_den.get_fdata()
 
 
-#%% Extract first echo from each contrast
+#%% De-concatenante
 
-idx_e1_mt0 = 0
-idx_e1_mtw = idx_e1_mt0 + n_mt0
-idx_e1_pdw = idx_e1_mtw + n_mtw
-idx_e1_t1w = idx_e1_pdw + n_pdw
+n = n_mt0 + n_mtw + n_pdw + n_t1w
 
-for idx in [idx_e1_mt0, idx_e1_mtw, idx_e1_pdw, idx_e1_t1w]:
+for idx in range(n):
     if raw_qmt[idx].den_nii.exists():
         logger.info(f'Already exist: {raw_qmt[idx].den_nii.stem}[.nii, .json]')
     else:
