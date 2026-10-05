@@ -91,6 +91,24 @@ class Contrast(enum.StrEnum):
     mt0 = 'mt0'
     
 
+#%% Prepare dirs
+
+work_dir.mkdir(parents=True, exist_ok=True)
+logger.info(f'work_dir is : {work_dir}')
+
+denoising_dir = work_dir / '01_Denoising'
+masking_dir   = work_dir / '02_Masking'
+moco_dir      = work_dir / '03_MotionCorrection'
+b1map_dir     = work_dir / '04_B1map'
+denoising_dir.mkdir(parents=True, exist_ok=True)
+masking_dir  .mkdir(parents=True, exist_ok=True)
+moco_dir     .mkdir(parents=True, exist_ok=True)
+b1map_dir    .mkdir(parents=True, exist_ok=True)
+
+results_dir = work_dir / 'Results'
+results_dir.mkdir(parents=True, exist_ok=True)
+
+
 #%% Fetch contrast dirs files
 
 raw_sources: list[File] = []
@@ -116,7 +134,7 @@ for root, dirs, files in os.walk(main_dir):
                 if regex_mtw.match(root): new.contrast = Contrast.mtw
                 if regex_pdw.match(root): new.contrast = Contrast.pdw
                 if regex_t1w.match(root): new.contrast = Contrast.t1w
-                new.den_nii = work_dir / f'den_{new.contrast}_e{new.echo_number}.nii'
+                new.den_nii = denoising_dir / f'den_{new.contrast}_e{new.echo_number}.nii'
                 new.den_json = new.den_nii.with_suffix('.json')
                 raw_sources.append(new)
             if regex_b1map.match(root):
@@ -163,12 +181,6 @@ if len(raw_b1map) > 1: raise FileNotFoundError(f'too many raw_b1map found with {
 raw_b1map: File = raw_b1map[0]
 
 
-#%% Copy data in work dir using symlinks
-
-work_dir.mkdir(parents=True, exist_ok=True)
-logger.info(f'work_dir is : {work_dir}')
-
-
 #%% Prepare qMT images : concatenate all raw images, for easy visual QC
 
 logger.info(f'Loading header raw_mt0'); img_mt0_raw = [nib.load(file.root / file.raw_nii) for file in raw_mt0]
@@ -181,7 +193,7 @@ logger.info(f'Loading data raw_mtw'); data_mtw_raw = np.stack([img.get_fdata() f
 logger.info(f'Loading data raw_pdw'); data_pdw_raw = np.stack([img.get_fdata() for img in img_pdw_raw], axis=3)
 logger.info(f'Loading data raw_t1w'); data_t1w_raw = np.stack([img.get_fdata() for img in img_t1w_raw], axis=3)
 
-path_qmt_raw = work_dir / 'data_qmt_raw.nii'
+path_qmt_raw = denoising_dir / '4D_raw.nii'
 if path_qmt_raw.exists():
     logger.info(f'Loading raw 4D : {path_qmt_raw}')    
     img_qmt_raw = nib.load(path_qmt_raw)
@@ -201,18 +213,19 @@ else:
 
 #%% Run tMPPCA
 
-path_qmt_den = work_dir / 'data_qmt_den.nii'
+path_qmt_den = denoising_dir / '4D_den.nii'
 if path_qmt_den.exists():
-    logger.info(f'tMPPCA done, load it : {path_qmt_den}')
-    img_qmt_den = nib.load(path_qmt_den)
-    data_qmt_den = img_qmt_den.get_fdata()
+    logger.info(f'tMPPCA already done : {path_qmt_den}')
 else:
     cmd = f'denoise-tmppca \
             --num_threads {os.cpu_count()} \
-            --window 5,5,5 \
+            --window 7,7,7 \
             {path_qmt_raw} \
             {path_qmt_den} '
     subprocess.run(cmd, shell=True)
+
+img_qmt_den = nib.load(path_qmt_den)
+data_qmt_den = img_qmt_den.get_fdata()
 
 
 #%% Extract first echo from each contrast
@@ -239,8 +252,8 @@ for idx in [idx_e1_mt0, idx_e1_mtw, idx_e1_pdw, idx_e1_t1w]:
 #%% Masking
 
 for con in Contrast:
-    fpath = work_dir / f'den_{con}_e1.nii'
-    mask  = work_dir / f'mask_{fpath.name}'
+    fpath = denoising_dir / f'den_{con}_e1.nii'
+    mask  = masking_dir   / f'mask_{fpath.name}'
     if mask.exists():
         logger.info(f'Already exist: {mask}')
     else:
@@ -248,16 +261,16 @@ for con in Contrast:
 
 #%% Motion correction
         
-target_img = work_dir /      'den_t1w_e1.nii'
-target_msk = work_dir / 'mask_den_t1w_e1.nii'
+target_img = denoising_dir /      'den_t1w_e1.nii'
+target_msk = masking_dir   / 'mask_den_t1w_e1.nii'
 
 for con in Contrast:
     if con is Contrast.t1w: continue
     
-    moving_img = work_dir / f'den_{con}_e1.nii'
-    moving_msk = work_dir / f'mask_{fpath.name}'
+    moving_img = denoising_dir / f'den_{con}_e1.nii'
+    moving_msk = masking_dir   / f'mask_{fpath.name}'
 
-    mat = work_dir / f'ants_{con}_0GenericAffine.mat'
+    mat = moco_dir / f'ants_{con}_0GenericAffine.mat'
     if not mat.exists():
         logger.info(f'antsRegistration {con} -> t1w : {moving_img}')
 
@@ -267,7 +280,7 @@ for con in Contrast:
                 --winsorize-image-intensities [0.005,0.995] \
                 --use-histogram-matching 0 \
                 --masks [{target_msk}, {moving_msk}] \
-                --output {work_dir}/ants_{con}_ \
+                --output {moco_dir}/ants_{con}_ \
                 --collapse-output-transforms 1 \
                 --interpolation LanczosWindowedSinc \
                 --transform Rigid[0.1] \
@@ -278,7 +291,7 @@ for con in Contrast:
 
         subprocess.run(cmd, shell=True)
 
-    moco_img = work_dir / f'moco_den_{con}_e1.nii'
+    moco_img = moco_dir / f'moco_den_{con}_e1.nii'
     if not moco_img.exists():
         logger.info(f'antsApplyTransforms {con} -> t1w : {moco_img}')
 
@@ -293,72 +306,12 @@ for con in Contrast:
         subprocess.run(cmd, shell=True)
 
 
-# #%% B1map : lucas
-        
-# b1map_raw = pathlib.Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM/S19_b1map_lucas/v_DEV2_444_09_compareMPM_S19_b1map_lucas.nii')
-
-# b1map_resliced = b1map_raw.parent / 'resliced_b1map.nii'
-# cmd = f'antsApplyTransforms \
-#                 --dimensionality 3 \
-#                 --interpolation LanczosWindowedSinc \
-#                 --input {b1map_raw}\
-#                 --reference-image {target_img} \
-#                 --output {b1map_resliced}'
-# subprocess.run(cmd, shell=True)
-
-# b1map_scaled = b1map_raw.parent / 'scaled_resliced_b1map.nii'
-# subprocess.run(f'ImageMath 3 {b1map_scaled} / {b1map_resliced} 800', shell=True)
-
-# b1map_smoothed = b1map_raw.parent / 's8_scaled_resliced_b1map.nii'
-# subprocess.run(f'SmoothImage 3 {b1map_scaled} 8 {b1map_smoothed}', shell=True)
-
-
-# #%% B1map : satTFL
-        
-# b1map_raw = pathlib.Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM/S23_b1map_satTFL/v_DEV2_444_09_compareMPM_S23_b1map_satTFL.nii')
-
-# b1map_resliced = b1map_raw.parent / 'resliced_b1map.nii'
-# cmd = f'antsApplyTransforms \
-#                 --dimensionality 3 \
-#                 --interpolation LanczosWindowedSinc \
-#                 --input {b1map_raw}\
-#                 --reference-image {target_img} \
-#                 --output {b1map_resliced}'
-# subprocess.run(cmd, shell=True)
-
-# b1map_scaled = b1map_raw.parent / 'scaled_resliced_b1map.nii'
-# subprocess.run(f'ImageMath 3 {b1map_scaled} / {b1map_resliced} 800', shell=True)
-
-# b1map_smoothed = b1map_raw.parent / 's8_scaled_resliced_b1map.nii'
-# subprocess.run(f'SmoothImage 3 {b1map_scaled} 8 {b1map_smoothed}', shell=True)
-
-
-# #%% B1map : 3DREAM
-        
-# b1map_raw = pathlib.Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM/S38_b1map_3DREAM_relB1/v_DEV2_444_09_compareMPM_S38_b1map_3DREAM_relB1.nii')
-
-# b1map_resliced = b1map_raw.parent / 'resliced_b1map.nii'
-# cmd = f'antsApplyTransforms \
-#                 --dimensionality 3 \
-#                 --interpolation LanczosWindowedSinc \
-#                 --input {b1map_raw}\
-#                 --reference-image {target_img} \
-#                 --output {b1map_resliced}'
-# subprocess.run(cmd, shell=True)
-
-# b1map_scaled = b1map_raw.parent / 'scaled_resliced_b1map.nii'
-# subprocess.run(f'ImageMath 3 {b1map_scaled} / {b1map_resliced} 1000', shell=True)
-
-# b1map_smoothed = b1map_raw.parent / 's8_scaled_resliced_b1map.nii'
-# subprocess.run(f'SmoothImage 3 {b1map_scaled} 8 {b1map_smoothed}', shell=True)
-
-
 #%% B1map
 
-raw_b1map_workdir = work_dir / 'b1map_raw.nii'
-b1map_resliced    = work_dir / 'b1map_resliced.nii'
-b1map_scaled      = work_dir / 'b1map_scaled.nii'
-b1map_smoothed    = work_dir / 'b1map_smoothed.nii'
+raw_b1map_workdir = b1map_dir / 'b1map_0_raw.nii'
+b1map_resliced    = b1map_dir / 'b1map_1_resliced.nii'
+b1map_scaled      = b1map_dir / 'b1map_2_scaled.nii'
+b1map_smoothed    = b1map_dir / 'b1map_3_smoothed.nii'
 if b1map_smoothed.exists():
     logger.info(f'B1map ready: {b1map_smoothed}')
 else:
@@ -377,13 +330,13 @@ else:
 
 #%% Fit
 
-mt0 = work_dir / 'moco_den_mt0_e1.nii'
-mtw = work_dir / 'moco_den_mtw_e1.nii'
-pdw = work_dir / 'moco_den_pdw_e1.nii'
-t1w = work_dir /      'den_t1w_e1.nii'
-mpf = work_dir / 'mpf.nii'
-t1f = work_dir / 't1f.nii'
-r1f = work_dir / 'r1f.nii'
+mt0 = moco_dir      / 'moco_den_mt0_e1.nii'
+mtw = moco_dir      / 'moco_den_mtw_e1.nii'
+pdw = moco_dir      / 'moco_den_pdw_e1.nii'
+t1w = denoising_dir /      'den_t1w_e1.nii'
+mpf = results_dir   / 'mpf.nii'
+t1f = results_dir   / 't1f.nii'
+r1f = results_dir   / 'r1f.nii'
 
 if t1f.exists():
     logger.info(f'fit-JSPqMT done: {t1f}')
@@ -402,20 +355,3 @@ else:
             --cpp_opt'
     subprocess.run(cmd, shell=True)
 
-
-# Summary of input MTw/MT0 sequence parameters:
-# 	 Saturation flip angle: 560.0 deg
-# 	 Saturation pulse off-resonance frenquency: 4000.0 Hz
-# 	 Saturation pulse shape: Hann-Sine
-# 	 Readout flip angle: 14.0 deg
-# 	 Readout pulse duration: 0.25 ms
-# 	 Readout pulse shape: BP
-# 	 Saturation pulse duration: 12.0 ms
-# 	 Interdelay saturation pulse <--> Readout pulse: 2.10 ms
-# 	 Sequence Time-to-Repetition: 30.0 ms
-
-# Summary of input VFA sequence parameters:
-# 	 Readout flip angles: [6.0, 33.0] deg
-# 	 Readout pulse duration: 0.25 ms
-# 	 Readout pulse shape: BP
-# 	 Sequence Time-to-Repetition: 30.0 ms
