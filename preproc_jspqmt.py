@@ -10,19 +10,22 @@ import logging, os, re, json, sys, enum, pathlib, shutil, subprocess
 
 main_dir = pathlib.Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM')
 
-# work_dir = main_dir / 'jspqmt_c9'
+path_size_pca = 5 # default value 5, while 7 is noisier
+rms_num_echos = 1 # use first echo, no need for RMS with 3 echos
+
+# work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}'
 # regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9$')
 # regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9$')
 # regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9$')
 # regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c9$')
 
-# work_dir = main_dir / 'jspqmt_c9_es'
+# work_dir = main_dir / f'jspqmt_c9_es_patch{path_size_pca}_rms{rms_num_echos}'
 # regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9_es$')
 # regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9_es$')
 # regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9_es$')
 # regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c9_es$')
 
-work_dir = main_dir / 'jspqmt_c6'
+work_dir = main_dir / f'jspqmt_c6_patch{path_size_pca}_rms{rms_num_echos}'
 regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c6$')
 regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c6$')
 regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c6$')
@@ -97,13 +100,17 @@ work_dir.mkdir(parents=True, exist_ok=True)
 logger.info(f'work_dir is : {work_dir}')
 
 denoising_dir = work_dir / '01_Denoising'
-masking_dir   = work_dir / '02_Masking'
-moco_dir      = work_dir / '03_MotionCorrection'
-b1map_dir     = work_dir / '04_B1map'
+rms_dir       = work_dir / '02_RMS'
+masking_dir   = work_dir / '03_Masking'
+moco_dir      = work_dir / '04_MotionCorrection'
+b1map_dir     = work_dir / '05_B1map'
+r2s_dir       = work_dir / '06_R2s'
 denoising_dir.mkdir(parents=True, exist_ok=True)
+rms_dir      .mkdir(parents=True, exist_ok=True)
 masking_dir  .mkdir(parents=True, exist_ok=True)
 moco_dir     .mkdir(parents=True, exist_ok=True)
 b1map_dir    .mkdir(parents=True, exist_ok=True)
+r2s_dir      .mkdir(parents=True, exist_ok=True)
 
 results_dir = work_dir / 'Results'
 results_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +175,10 @@ logger.info(f'found n_mt0={n_mt0} raw_mtw magnitudes')
 logger.info(f'found n_mtw={n_mtw} raw_mtw magnitudes')
 logger.info(f'found n_pdw={n_pdw} raw_pdw magnitudes')
 logger.info(f'found n_t1w={n_t1w} raw_t1w magnitudes')
+if n_mt0 < rms_num_echos: raise ValueError(f'not enough {n_mt0}/{rms_num_echos} echos for mt0')
+if n_mtw < rms_num_echos: raise ValueError(f'not enough {n_mt0}/{rms_num_echos} echos for mtw')
+if n_pdw < rms_num_echos: raise ValueError(f'not enough {n_mt0}/{rms_num_echos} echos for pdw')
+if n_t1w < rms_num_echos: raise ValueError(f'not enough {n_mt0}/{rms_num_echos} echos for t1w')
 
 logger.info(f'mt0 // sorted TE = {[round(file.echo_time*1000,3) for file in raw_mt0]}(ms)')
 logger.info(f'mtw // sorted TE = {[round(file.echo_time*1000,3) for file in raw_mtw]}(ms)')
@@ -219,7 +230,7 @@ if path_qmt_den.exists():
 else:
     cmd = f'denoise-tmppca \
             --num_threads {os.cpu_count()} \
-            --window 7,7,7 \
+            --window {path_size_pca},{path_size_pca},{path_size_pca} \
             {path_qmt_raw} \
             {path_qmt_den} '
     subprocess.run(cmd, shell=True)
@@ -230,9 +241,7 @@ data_qmt_den = img_qmt_den.get_fdata()
 
 #%% De-concatenante
 
-n = n_mt0 + n_mtw + n_pdw + n_t1w
-
-for idx in range(n):
+for idx in range(len(raw_qmt)):
     if raw_qmt[idx].den_nii.exists():
         logger.info(f'Already exist: {raw_qmt[idx].den_nii.stem}[.nii, .json]')
     else:
@@ -246,26 +255,47 @@ for idx in range(n):
         shutil.copyfile(raw_qmt[idx].raw_json,raw_qmt[idx].den_json)
 
 
+#%% Root Mean Square of the first echos
+
+for con in Contrast:
+    fpath = rms_dir / f'den_{con}_rms.nii'
+    if fpath.exists():
+        logger.info(f'Already exist: {fpath}')
+    else:
+        file_stack = list(filter(lambda x: x.contrast==con, raw_mag))
+        file_stack = file_stack[:rms_num_echos]
+        img_stack = [nib.load(file.root / file.den_nii) for file in file_stack]
+        data_stack = np.stack([img.get_fdata() for img in img_stack], axis=3)
+        rms = np.sqrt(np.mean(np.square(data_stack),axis=3))
+        img_rms = nib.Nifti1Image(
+            dataobj=rms,
+            affine=img_stack[0].affine,
+            header=img_stack[0].header)
+        logger.info(f'Writing {fpath}')
+        nib.save(img_rms, fpath)
+
+
 #%% Masking
 
 for con in Contrast:
-    fpath = denoising_dir / f'den_{con}_e1.nii'
+    fpath = rms_dir / f'den_{con}_rms.nii'
     mask  = masking_dir   / f'mask_{fpath.name}'
     if mask.exists():
         logger.info(f'Already exist: {mask}')
     else:
         subprocess.run(f'mri_synthstrip --image {fpath} --mask {mask} --border 2', shell=True)
 
+
 #%% Motion correction
         
-target_img = denoising_dir /      'den_t1w_e1.nii'
-target_msk = masking_dir   / 'mask_den_t1w_e1.nii'
+target_img = rms_dir     /      'den_t1w_rms.nii'
+target_msk = masking_dir / 'mask_den_t1w_rms.nii'
 
 for con in Contrast:
     if con is Contrast.t1w: continue
     
-    moving_img = denoising_dir / f'den_{con}_e1.nii'
-    moving_msk = masking_dir   / f'mask_{fpath.name}'
+    moving_img = rms_dir     / f'den_{con}_rms.nii'
+    moving_msk = masking_dir / f'mask_{fpath.name}'
 
     mat = moco_dir / f'ants_{con}_0GenericAffine.mat'
     if not mat.exists():
@@ -288,7 +318,7 @@ for con in Contrast:
 
         subprocess.run(cmd, shell=True)
 
-    moco_img = moco_dir / f'moco_den_{con}_e1.nii'
+    moco_img = moco_dir / f'moco_den_{con}_rms.nii'
     if not moco_img.exists():
         logger.info(f'antsApplyTransforms {con} -> t1w : {moco_img}')
 
@@ -327,13 +357,13 @@ else:
 
 #%% Fit
 
-mt0 = moco_dir      / 'moco_den_mt0_e1.nii'
-mtw = moco_dir      / 'moco_den_mtw_e1.nii'
-pdw = moco_dir      / 'moco_den_pdw_e1.nii'
-t1w = denoising_dir /      'den_t1w_e1.nii'
-mpf = results_dir   / 'mpf.nii'
-t1f = results_dir   / 't1f.nii'
-r1f = results_dir   / 'r1f.nii'
+mt0 = moco_dir    / 'moco_den_mt0_rms.nii'
+mtw = moco_dir    / 'moco_den_mtw_rms.nii'
+pdw = moco_dir    / 'moco_den_pdw_rms.nii'
+t1w = rms_dir     /      'den_t1w_rms.nii'
+mpf = results_dir / 'mpf.nii'
+t1f = results_dir / 't1f.nii'
+r1f = results_dir / 'r1f.nii'
 
 if t1f.exists():
     logger.info(f'fit-JSPqMT done: {t1f}')
@@ -352,3 +382,89 @@ else:
             --cpp_opt'
     subprocess.run(cmd, shell=True)
 
+
+#%% fit R2*
+
+def fit_t2s_ols(data: np.ndarray, TE: np.ndarray, mask: np.ndarray):
+
+    nx,ny,nz,ne = data.shape
+    nvox = nx*ny*nz
+    data_2d = np.reshape(data, (nvox,ne))
+    mask_flat = np.reshape(mask, (nvox))
+    
+    mask_flat = mask_flat > 0.1
+    data_masked = data_2d[mask_flat]
+
+    y = np.log(data_masked).T
+    y[~np.isfinite(y)] = 0
+    x = np.array([np.ones(ne), TE]).T
+    beta, err_flat, _, _ = np.linalg.lstsq( x, y )
+
+    s0_flat = np.exp(beta[0,:])
+
+    r2s_flat = -beta[1,:]
+    t2s_flat = 1/r2s_flat
+    r2s_flat[r2s_flat<0] = 0
+    t2s_flat[t2s_flat>1] = 0
+    t2s_flat[t2s_flat<0] = 0
+
+    s0  = np.zeros(nvox, dtype=np.float32)
+    r2s = np.zeros(nvox, dtype=np.float32)
+    t2s = np.zeros(nvox, dtype=np.float32)
+    err = np.zeros(nvox, dtype=np.float32)
+    s0 [mask_flat] = s0_flat
+    r2s[mask_flat] = r2s_flat
+    t2s[mask_flat] = t2s_flat
+    err[mask_flat] = err_flat
+    s0  =  s0.reshape(nx,ny,nz)
+    r2s = r2s.reshape(nx,ny,nz)
+    t2s = t2s.reshape(nx,ny,nz)
+    err = err.reshape(nx,ny,nz)
+
+    return s0, t2s, r2s, err
+
+def write_fit_t2s(img, t2s, r2s, path):
+
+    img_T2s = nib.Nifti1Image(
+        dataobj=t2s,
+        affine=img.affine,
+        header=img.header,
+        dtype=np.float32)
+    nib.save(img_T2s, path / f't2s.nii')
+
+    img_R2s = nib.Nifti1Image(
+        dataobj=r2s,
+        affine=img.affine,
+        header=img.header,
+        dtype=np.float32)
+    nib.save(img_R2s, path / f'r2s.nii')
+
+r2s_nativespace = r2s_dir / f'r2s.nii'
+if r2s_nativespace.exists():
+    logger.info(f'Already exist: {r2s_nativespace}')
+else:
+    img_mt0_den = [nib.load(file.root / file.den_nii) for file in raw_mt0]
+    data_mt0_den = np.stack([img.get_fdata() for img in img_mt0_den], axis=3)
+    mask_mt0_den = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    te = [file.echo_time for file in raw_mt0]
+    
+    s0, t2s, r2s, err = fit_t2s_ols(data_mt0_den, te, mask_mt0_den)
+    write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir)
+
+r2s_img = results_dir / f'r2s.nii'
+if r2s_img.exists():
+    logger.info(f'Already exist: {r2s_nativespace}')
+else:
+    mat = moco_dir / f'ants_mt0_0GenericAffine.mat'
+    for con in ['r2s','t2s']:
+        img_in  = r2s_dir     / f'{con}.nii'
+        img_out = results_dir / f'{con}.nii'
+        logger.info(f'antsApplyTransforms {con} -> t1w : {img_out}')
+        cmd = f'antsApplyTransforms \
+                --dimensionality 3 \
+                --interpolation LanczosWindowedSinc \
+                --input {img_in}\
+                --reference-image {img_in} \
+                --transform {mat} \
+                --output {img_out}'
+        subprocess.run(cmd, shell=True)
