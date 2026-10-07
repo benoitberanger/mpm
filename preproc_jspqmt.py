@@ -13,11 +13,11 @@ main_dir = pathlib.Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/20
 path_size_pca = 5 # default value 5, while 7 is noisier
 rms_num_echos = 1 # use first echo, no need for RMS with 3 echos
 
-# work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}'
-# regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9$')
-# regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9$')
-# regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9$')
-# regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c9$')
+work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}'
+regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9$')
+regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9$')
+regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9$')
+regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c9$')
 
 # work_dir = main_dir / f'jspqmt_c9_es_patch{path_size_pca}_rms{rms_num_echos}'
 # regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9_es$')
@@ -25,11 +25,11 @@ rms_num_echos = 1 # use first echo, no need for RMS with 3 echos
 # regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9_es$')
 # regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c9_es$')
 
-work_dir = main_dir / f'jspqmt_c6_patch{path_size_pca}_rms{rms_num_echos}'
-regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c6$')
-regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c6$')
-regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c6$')
-regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c6$')
+# work_dir = main_dir / f'jspqmt_c6_patch{path_size_pca}_rms{rms_num_echos}'
+# regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c6$')
+# regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c6$')
+# regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c6$')
+# regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c6$')
 
 regex_rawnifti  = re.compile(r'^v_.*nii$')
 
@@ -514,3 +514,99 @@ else:
                 --output {img_out}'
         subprocess.run(cmd, shell=True)
         
+#%% fit R2* // WLS
+
+def fit_t2s_wls(data: np.ndarray,
+                TE: np.ndarray,
+                mask: np.ndarray
+                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
+
+    nx,ny,nz,ne = data.shape
+    nvox = nx*ny*nz
+    data_2d = np.reshape(data, (nvox,ne))
+    mask_flat = np.reshape(mask, (nvox))
+
+    mask_flat = mask_flat > 0.1
+    data_masked = data_2d[mask_flat]
+    nvox_flat = np.count_nonzero(mask_flat)
+
+    y = np.log(data_masked).T
+    y[~np.isfinite(y)] = 0
+    x = np.array([np.ones(ne), TE]).T
+
+    w = np.diag(np.sqrt(1/TE))
+    xw = np.dot(w,x)
+    yw = np.dot(w,y) 
+    beta, err_flat, _, _ = np.linalg.lstsq( xw, yw )
+
+    # beta_ols, _, _, _ = np.linalg.lstsq( x, y )
+    # err_ols = y - x @ beta_ols
+    # beta     = np.zeros((2,nvox_flat))
+    # err_flat = np.zeros((nvox_flat))
+    # check: int = round(nvox_flat / 10)
+    # c: int = 0
+    # print(f'WLS : {0}%')
+    # for ivox in range(nvox_flat):
+    #     if ivox == check * (c+1):
+    #         c+=1
+    #         print(f'WLS : {10*c}%')
+    #     w = np.diag(1 / err_ols[:,ivox])
+    #     xw = np.dot(w,x)
+    #     yw = np.dot(y[:,ivox],w) 
+    #     b, e, _, _ = np.linalg.lstsq( xw, yw )
+    #     beta[:,ivox] = b
+    #     err_flat[ivox] = e[0]
+
+    s0_flat = np.exp(beta[0,:])
+
+    r2s_flat = -beta[1,:]
+    t2s_flat = 1/r2s_flat
+    r2s_flat[r2s_flat<0] = 0
+    t2s_flat[t2s_flat>1] = 0
+    t2s_flat[t2s_flat<0] = 0
+
+    s0  = np.zeros(nvox, dtype=np.float32)
+    r2s = np.zeros(nvox, dtype=np.float32)
+    t2s = np.zeros(nvox, dtype=np.float32)
+    err = np.zeros(nvox, dtype=np.float32)
+    s0 [mask_flat] = s0_flat
+    r2s[mask_flat] = r2s_flat
+    t2s[mask_flat] = t2s_flat
+    err[mask_flat] = err_flat
+    s0  =  s0.reshape(nx,ny,nz)
+    r2s = r2s.reshape(nx,ny,nz)
+    t2s = t2s.reshape(nx,ny,nz)
+    err = err.reshape(nx,ny,nz)
+
+    return s0, t2s, r2s, err
+
+r2s_wls = r2s_dir / f'r2s_wls.nii'
+if r2s_wls.exists():
+    logger.info(f'Already exist: {r2s_wls}')
+else:
+    img_mt0_den = [nib.load(file.root / file.den_nii) for file in raw_mt0]
+    data_mt0_den = np.stack([img.get_fdata() for img in img_mt0_den], axis=3)
+    mask_mt0_den = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    te = np.array([file.echo_time for file in raw_mt0])
+
+    s0, t2s, r2s, err = fit_t2s_wls(data_mt0_den, te, mask_mt0_den)
+
+    write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir, 'wls')
+
+r2s_img = results_dir / f'r2s_wls.nii'
+if r2s_img.exists():
+    logger.info(f'Already exist: {r2s_wls}')
+else:
+    mat = moco_dir / f'ants_mt0_0GenericAffine.mat'
+    for con in ['r2s','t2s']:
+        img_in  = r2s_dir     / f'{con}_wls.nii'
+        img_out = results_dir / f'{con}_wls.nii'
+        logger.info(f'antsApplyTransforms {con} -> t1w : {img_out}')
+        cmd = f'antsApplyTransforms \
+                --dimensionality 3 \
+                --interpolation LanczosWindowedSinc \
+                --input {img_in}\
+                --reference-image {img_in} \
+                --transform {mat} \
+                --output {img_out}'
+        subprocess.run(cmd, shell=True)
