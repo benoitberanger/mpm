@@ -383,7 +383,7 @@ else:
     subprocess.run(cmd, shell=True)
 
 
-#%% fit R2*
+#%% fit R2* // OLS
 
 def fit_t2s_ols(data: np.ndarray,
                 TE: np.ndarray,
@@ -442,9 +442,9 @@ def write_fit_t2s(img: nib.Nifti1Image,
         nib.save(img_T2s, path / f't2s.nii')
         nib.save(img_R2s, path / f'r2s.nii')
 
-r2s_nativespace = r2s_dir / f'r2s.nii'
-if r2s_nativespace.exists():
-    logger.info(f'Already exist: {r2s_nativespace}')
+r2s_ols = r2s_dir / f'r2s_ols.nii'
+if r2s_ols.exists():
+    logger.info(f'Already exist: {r2s_ols}')
 else:
     img_mt0_den = [nib.load(file.root / file.den_nii) for file in raw_mt0]
     data_mt0_den = np.stack([img.get_fdata() for img in img_mt0_den], axis=3)
@@ -456,7 +456,7 @@ else:
 
 r2s_img = results_dir / f'r2s_ols.nii'
 if r2s_img.exists():
-    logger.info(f'Already exist: {r2s_nativespace}')
+    logger.info(f'Already exist: {r2s_ols}')
 else:
     mat = moco_dir / f'ants_mt0_0GenericAffine.mat'
     for con in ['r2s','t2s']:
@@ -471,3 +471,46 @@ else:
                 --transform {mat} \
                 --output {img_out}'
         subprocess.run(cmd, shell=True)
+
+
+#%% fit R2* // NumART
+        
+r2s_numart = r2s_dir / f'r2s_numart.nii'
+if r2s_numart.exists():
+    logger.info(f'Already exist: {r2s_numart}')
+else:
+    img_mt0_den = [nib.load(file.root / file.den_nii) for file in raw_mt0]
+    data_mt0_den = np.stack([img.get_fdata() for img in img_mt0_den], axis=3)
+    mask_mt0_den = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    te = [file.echo_time for file in raw_mt0]
+
+    t2s = (te[-1]-te[0]) / (2*(len(te)-1)) \
+        * ( (data_mt0_den[:,:,:,0] + data_mt0_den[:,:,:,-1]) + 2 * np.sum(data_mt0_den[:,:,:,1:-1], axis=3) ) \
+        /   (data_mt0_den[:,:,:,0] - data_mt0_den[:,:,:,-1])
+
+    t2s *= mask_mt0_den
+    r2s = 1/t2s
+    t2s[t2s<0]    = 0
+    t2s[t2s>1]    = 0
+    r2s[r2s<0]    = 0
+    r2s[r2s>1000] = 0
+    write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir, 'numart')
+
+r2s_img = results_dir / f'r2s_numart.nii'
+if r2s_img.exists():
+    logger.info(f'Already exist: {r2s_numart}')
+else:
+    mat = moco_dir / f'ants_mt0_0GenericAffine.mat'
+    for con in ['r2s','t2s']:
+        img_in  = r2s_dir     / f'{con}_numart.nii'
+        img_out = results_dir / f'{con}_numart.nii'
+        logger.info(f'antsApplyTransforms {con} -> t1w : {img_out}')
+        cmd = f'antsApplyTransforms \
+                --dimensionality 3 \
+                --interpolation LanczosWindowedSinc \
+                --input {img_in}\
+                --reference-image {img_in} \
+                --transform {mat} \
+                --output {img_out}'
+        subprocess.run(cmd, shell=True)
+        
