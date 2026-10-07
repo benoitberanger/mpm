@@ -385,7 +385,10 @@ else:
 
 #%% fit R2*
 
-def fit_t2s_ols(data: np.ndarray, TE: np.ndarray, mask: np.ndarray):
+def fit_t2s_ols(data: np.ndarray,
+                TE: np.ndarray,
+                mask: np.ndarray
+                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
 
     nx,ny,nz,ne = data.shape
     nvox = nx*ny*nz
@@ -423,21 +426,21 @@ def fit_t2s_ols(data: np.ndarray, TE: np.ndarray, mask: np.ndarray):
 
     return s0, t2s, r2s, err
 
-def write_fit_t2s(img, t2s, r2s, path):
+def write_fit_t2s(img: nib.Nifti1Image,
+                  t2s: np.ndarray,
+                  r2s: np.ndarray,
+                  path: pathlib.Path,
+                  suffix: str | None = None
+                  ) -> None:
 
-    img_T2s = nib.Nifti1Image(
-        dataobj=t2s,
-        affine=img.affine,
-        header=img.header,
-        dtype=np.float32)
-    nib.save(img_T2s, path / f't2s.nii')
-
-    img_R2s = nib.Nifti1Image(
-        dataobj=r2s,
-        affine=img.affine,
-        header=img.header,
-        dtype=np.float32)
-    nib.save(img_R2s, path / f'r2s.nii')
+    img_T2s = nib.Nifti1Image(dataobj=t2s, affine=img.affine, header=img.header, dtype=np.float32)
+    img_R2s = nib.Nifti1Image(dataobj=r2s, affine=img.affine, header=img.header, dtype=np.float32)
+    if suffix:
+        nib.save(img_T2s, path / f't2s_{suffix}.nii')
+        nib.save(img_R2s, path / f'r2s_{suffix}.nii')
+    else:
+        nib.save(img_T2s, path / f't2s.nii')
+        nib.save(img_R2s, path / f'r2s.nii')
 
 r2s_nativespace = r2s_dir / f'r2s.nii'
 if r2s_nativespace.exists():
@@ -449,16 +452,16 @@ else:
     te = [file.echo_time for file in raw_mt0]
     
     s0, t2s, r2s, err = fit_t2s_ols(data_mt0_den, te, mask_mt0_den)
-    write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir)
+    write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir, 'ols')
 
-r2s_img = results_dir / f'r2s.nii'
+r2s_img = results_dir / f'r2s_ols.nii'
 if r2s_img.exists():
     logger.info(f'Already exist: {r2s_nativespace}')
 else:
     mat = moco_dir / f'ants_mt0_0GenericAffine.mat'
     for con in ['r2s','t2s']:
-        img_in  = r2s_dir     / f'{con}.nii'
-        img_out = results_dir / f'{con}.nii'
+        img_in  = r2s_dir     / f'{con}_ols.nii'
+        img_out = results_dir / f'{con}_ols.nii'
         logger.info(f'antsApplyTransforms {con} -> t1w : {img_out}')
         cmd = f'antsApplyTransforms \
                 --dimensionality 3 \
