@@ -62,37 +62,45 @@ class File:
     def __bool__(self)        -> bool: return len(self.nii)>0
     
     @property
-    def main_dir(self): return self._main_dir
+    def main_dir (self): return self._main_dir
     @property
-    def root    (self): return self._root
+    def root     (self): return self._root
     @property
-    def raw_nii (self): return self._raw_nii
+    def raw_nii  (self): return self._raw_nii
     @property
-    def raw_json(self): return self._raw_json
+    def raw_json (self): return self._raw_json
     @property
-    def den_nii (self): return self._den_nii
+    def den_nii  (self): return self._den_nii
     @property
-    def den_json(self): return self._den_json
+    def den_json (self): return self._den_json
+    @property
+    def moco_nii (self): return self._moco_nii
+    @property
+    def moco_json(self): return self._moco_json
     
     @main_dir.setter
-    def main_dir(self, value): self._main_dir = pathlib.Path(value)
+    def main_dir (self, value): self._main_dir  = pathlib.Path(value)
     @root.setter
-    def root    (self, value): self._root     = pathlib.Path(value)
+    def root     (self, value): self._root      = pathlib.Path(value)
     @raw_nii.setter
-    def raw_nii (self, value): self._raw_nii  = pathlib.Path(value)
+    def raw_nii  (self, value): self._raw_nii   = pathlib.Path(value)
     @raw_json.setter
-    def raw_json(self, value): self._raw_json = pathlib.Path(value)
+    def raw_json (self, value): self._raw_json  = pathlib.Path(value)
     @den_nii.setter
-    def den_nii (self, value): self._den_nii  = pathlib.Path(value)
+    def den_nii  (self, value): self._den_nii   = pathlib.Path(value)
     @den_json.setter
-    def den_json(self, value): self._den_json = pathlib.Path(value)
+    def den_json (self, value): self._den_json  = pathlib.Path(value)
+    @moco_nii.setter
+    def moco_nii (self, value): self._moco_nii  = pathlib.Path(value)
+    @moco_json.setter
+    def moco_json(self, value): self._moco_json = pathlib.Path(value)
 
 class Contrast(enum.StrEnum):
     pdw = 'pdw'
     t1w = 't1w'
     mtw = 'mtw'
     mt0 = 'mt0'
-    
+
 
 #%% Prepare dirs
 
@@ -104,13 +112,11 @@ rms_dir       = work_dir / '02_RMS'
 masking_dir   = work_dir / '03_Masking'
 moco_dir      = work_dir / '04_MotionCorrection'
 b1map_dir     = work_dir / '05_B1map'
-r2s_dir       = work_dir / '06_R2s'
 denoising_dir.mkdir(parents=True, exist_ok=True)
 rms_dir      .mkdir(parents=True, exist_ok=True)
 masking_dir  .mkdir(parents=True, exist_ok=True)
 moco_dir     .mkdir(parents=True, exist_ok=True)
 b1map_dir    .mkdir(parents=True, exist_ok=True)
-r2s_dir      .mkdir(parents=True, exist_ok=True)
 
 results_dir = work_dir / 'Results'
 results_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +149,8 @@ for root, dirs, files in os.walk(main_dir):
                 if regex_t1w.match(root): new.contrast = Contrast.t1w
                 new.den_nii = denoising_dir / f'den_{new.contrast}_e{new.echo_number}.nii'
                 new.den_json = new.den_nii.with_suffix('.json')
+                new.moco_nii = moco_dir / f'moco_{new.den_nii.name}'
+                new.moco_json = new.moco_nii.with_suffix('.json')
                 raw_sources.append(new)
             if regex_b1map.match(root):
                 new.is_b1map = True
@@ -321,7 +329,6 @@ for con in Contrast:
     moco_img = moco_dir / f'moco_den_{con}_rms.nii'
     if not moco_img.exists():
         logger.info(f'antsApplyTransforms {con} -> t1w : {moco_img}')
-
         cmd = f'antsApplyTransforms \
                 --dimensionality 3 \
                 --interpolation LanczosWindowedSinc \
@@ -329,9 +336,24 @@ for con in Contrast:
                 --reference-image {moving_img} \
                 --transform {mat} \
                 --output {moco_img}'
-
         subprocess.run(cmd, shell=True)
 
+    # for R2s fit
+    if con is Contrast.mt0:
+        for echo in range(1,n_mt0+1):
+            file_in  = denoising_dir /      f'den_{con}_e{echo}.nii'
+            file_out = moco_dir      / f'moco_den_{con}_e{echo}.nii'
+            if not file_out.exists():
+                logger.info(f'antsApplyTransforms {con} -> t1w : {file_out}')
+                cmd = f'antsApplyTransforms \
+                        --dimensionality 3 \
+                        --interpolation LanczosWindowedSinc \
+                        --input {file_in}\
+                        --reference-image {file_in} \
+                        --transform {mat} \
+                        --output {file_out}'
+                subprocess.run(cmd, shell=True)
+                
 
 #%% B1map
 
@@ -383,12 +405,12 @@ else:
     subprocess.run(cmd, shell=True)
 
 
-#%% fit R2* // OLS
+#%% fit R2* // functions
 
 def fit_t2s_loglin_leastsquare(data: np.ndarray,
-                                TE  : np.ndarray,
-                                mask: np.ndarray,
-                                method: str
+                               TE  : np.ndarray,
+                               mask: np.ndarray,
+                               method: str
                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
 
     nx,ny,nz,ne = data.shape
@@ -472,107 +494,58 @@ def write_fit_t2s(img: nib.Nifti1Image,
         nib.save(img_T2s, path / f't2s.nii')
         nib.save(img_R2s, path / f'r2s.nii')
 
-r2s_ols = r2s_dir / f'r2s_ols.nii'
+
+#%% fit R2* // OLS
+
+r2s_ols = results_dir / f'r2s_ols.nii'
 if r2s_ols.exists():
     logger.info(f'Already exist: {r2s_ols}')
 else:
-    img_mt0_den = [nib.load(file.root / file.den_nii) for file in raw_mt0]
-    data_mt0_den = np.stack([img.get_fdata() for img in img_mt0_den], axis=3)
-    mask_mt0_den = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
+    data_mt0 = np.stack([img.get_fdata() for img in img_mt0], axis=3)
+    mask_mt0 = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
     te = [file.echo_time for file in raw_mt0]
     
-    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0_den, te, mask_mt0_den, 'ols')
-    write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir, 'ols')
+    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0, te, mask_mt0, 'ols')
+    write_fit_t2s(img_mt0[0], t2s, r2s, results_dir, 'ols')
 
-r2s_img = results_dir / f'r2s_ols.nii'
-if r2s_img.exists():
-    logger.info(f'Already exist: {r2s_ols}')
+
+#%% fit R2* // WLS
+
+r2s_wls = results_dir / f'r2s_wls.nii'
+if r2s_wls.exists():
+    logger.info(f'Already exist: {r2s_wls}')
 else:
-    mat = moco_dir / f'ants_mt0_0GenericAffine.mat'
-    for con in ['r2s','t2s']:
-        img_in  = r2s_dir     / f'{con}_ols.nii'
-        img_out = results_dir / f'{con}_ols.nii'
-        logger.info(f'antsApplyTransforms {con} -> t1w : {img_out}')
-        cmd = f'antsApplyTransforms \
-                --dimensionality 3 \
-                --interpolation LanczosWindowedSinc \
-                --input {img_in}\
-                --reference-image {img_in} \
-                --transform {mat} \
-                --output {img_out}'
-        subprocess.run(cmd, shell=True)
+    img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
+    data_mt0 = np.stack([img.get_fdata() for img in img_mt0], axis=3)
+    mask_mt0 = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    te = np.array([file.echo_time for file in raw_mt0])
+
+    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0, te, mask_mt0, 'wls')
+
+    write_fit_t2s(img_mt0[0], t2s, r2s, results_dir, 'wls')
 
 
 #%% fit R2* // NumART
         
-r2s_numart = r2s_dir / f'r2s_numart.nii'
+r2s_numart = results_dir / f'r2s_numart.nii'
 if r2s_numart.exists():
     logger.info(f'Already exist: {r2s_numart}')
 else:
-    img_mt0_den = [nib.load(file.root / file.den_nii) for file in raw_mt0]
-    data_mt0_den = np.stack([img.get_fdata() for img in img_mt0_den], axis=3)
-    mask_mt0_den = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
+    data_mt0 = np.stack([img.get_fdata() for img in img_mt0], axis=3)
+    mask_mt0 = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
     te = [file.echo_time for file in raw_mt0]
 
     t2s = (te[-1]-te[0]) / (2*(len(te)-1)) \
-        * ( (data_mt0_den[:,:,:,0] + data_mt0_den[:,:,:,-1]) + 2 * np.sum(data_mt0_den[:,:,:,1:-1], axis=3) ) \
-        /   (data_mt0_den[:,:,:,0] - data_mt0_den[:,:,:,-1])
+        * ( (data_mt0[:,:,:,0] + data_mt0[:,:,:,-1]) + 2 * np.sum(data_mt0[:,:,:,1:-1], axis=3) ) \
+        /   (data_mt0[:,:,:,0] - data_mt0[:,:,:,-1])
 
-    t2s *= mask_mt0_den
+    t2s *= mask_mt0
     r2s = 1/t2s
     t2s[t2s<0]    = 0
     t2s[t2s>1]    = 0
     r2s[r2s<0]    = 0
     r2s[r2s>1000] = 0
-    write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir, 'numart')
+    write_fit_t2s(img_mt0[0], t2s, r2s, results_dir, 'numart')
 
-r2s_img = results_dir / f'r2s_numart.nii'
-if r2s_img.exists():
-    logger.info(f'Already exist: {r2s_numart}')
-else:
-    mat = moco_dir / f'ants_mt0_0GenericAffine.mat'
-    for con in ['r2s','t2s']:
-        img_in  = r2s_dir     / f'{con}_numart.nii'
-        img_out = results_dir / f'{con}_numart.nii'
-        logger.info(f'antsApplyTransforms {con} -> t1w : {img_out}')
-        cmd = f'antsApplyTransforms \
-                --dimensionality 3 \
-                --interpolation LanczosWindowedSinc \
-                --input {img_in}\
-                --reference-image {img_in} \
-                --transform {mat} \
-                --output {img_out}'
-        subprocess.run(cmd, shell=True)
-        
-#%% fit R2* // WLS
-
-r2s_wls = r2s_dir / f'r2s_wls.nii'
-if r2s_wls.exists():
-    logger.info(f'Already exist: {r2s_wls}')
-else:
-    img_mt0_den = [nib.load(file.root / file.den_nii) for file in raw_mt0]
-    data_mt0_den = np.stack([img.get_fdata() for img in img_mt0_den], axis=3)
-    mask_mt0_den = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
-    te = np.array([file.echo_time for file in raw_mt0])
-
-    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0_den, te, mask_mt0_den, 'wls')
-
-    write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir, 'wls')
-
-r2s_img = results_dir / f'r2s_wls.nii'
-if r2s_img.exists():
-    logger.info(f'Already exist: {r2s_wls}')
-else:
-    mat = moco_dir / f'ants_mt0_0GenericAffine.mat'
-    for con in ['r2s','t2s']:
-        img_in  = r2s_dir     / f'{con}_wls.nii'
-        img_out = results_dir / f'{con}_wls.nii'
-        logger.info(f'antsApplyTransforms {con} -> t1w : {img_out}')
-        cmd = f'antsApplyTransforms \
-                --dimensionality 3 \
-                --interpolation LanczosWindowedSinc \
-                --input {img_in}\
-                --reference-image {img_in} \
-                --transform {mat} \
-                --output {img_out}'
-        subprocess.run(cmd, shell=True)
