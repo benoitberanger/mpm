@@ -415,24 +415,27 @@ def fit_t2s_loglin_leastsquare(data: np.ndarray,
 
     nx,ny,nz,ne = data.shape
     nvox = nx*ny*nz
-    data_2d = np.reshape(data, (nvox,ne))
+    
+    data = np.permute_dims(data, (3,0,1,2)) # echos on the first dimension, easier reshape
+
+    data_2d = np.reshape(data, (ne,nvox))
     mask_flat = np.reshape(mask, (nvox))
     
     mask_flat = mask_flat > 0.1
-    data_masked = data_2d[mask_flat]
+    data_masked = data_2d[:,mask_flat]
 
-    y = np.log(data_masked).T
-    y[~np.isfinite(y)] = 0
-    x = np.array([np.ones(ne), TE]).T
+    b = np.log(data_masked)
+    b[~np.isfinite(b)] = 0
+    a = np.vstack( (np.ones(ne), TE) ).T
 
     if method == 'ols':
-        beta, err_flat, _, _ = np.linalg.lstsq( x, y )
+        beta, err_flat, _, _ = np.linalg.lstsq( a, b )
     elif method == 'wls':
         # weighted least square : use 1/TE as weight, as later echos have less SNR
         w = np.diag(np.sqrt(1/TE))
-        xw = np.dot(w,x)
-        yw = np.dot(w,y) 
-        beta, err_flat, _, _ = np.linalg.lstsq( xw, yw )
+        wa = np.dot(w,a)
+        wb = np.dot(w,b) 
+        beta, err_flat, _, _ = np.linalg.lstsq( wa, wb )
 
         # weighted least square : use OLS residuals as weight -> not giving better results with the prio pre-processing
         # beta_ols, _, _, _ = np.linalg.lstsq( x, y )
