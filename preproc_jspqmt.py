@@ -112,11 +112,13 @@ rms_dir       = work_dir / '02_RMS'
 masking_dir   = work_dir / '03_Masking'
 moco_dir      = work_dir / '04_MotionCorrection'
 b1map_dir     = work_dir / '05_B1map'
+r2s_dir       = work_dir / '05_R2s'
 denoising_dir.mkdir(parents=True, exist_ok=True)
 rms_dir      .mkdir(parents=True, exist_ok=True)
 masking_dir  .mkdir(parents=True, exist_ok=True)
 moco_dir     .mkdir(parents=True, exist_ok=True)
 b1map_dir    .mkdir(parents=True, exist_ok=True)
+r2s_dir      .mkdir(parents=True, exist_ok=True)
 
 results_dir = work_dir / 'Results'
 results_dir.mkdir(parents=True, exist_ok=True)
@@ -338,21 +340,25 @@ for con in Contrast:
                 --output {moco_img}'
         subprocess.run(cmd, shell=True)
 
-    # for R2s fit
-    if con is Contrast.mt0:
-        for echo in range(1,n_mt0+1):
-            file_in  = denoising_dir /      f'den_{con}_e{echo}.nii'
-            file_out = moco_dir      / f'moco_den_{con}_e{echo}.nii'
-            if not file_out.exists():
-                logger.info(f'antsApplyTransforms {con} -> t1w : {file_out}')
-                cmd = f'antsApplyTransforms \
-                        --dimensionality 3 \
-                        --interpolation LanczosWindowedSinc \
-                        --input {file_in}\
-                        --reference-image {file_in} \
-                        --transform {mat} \
-                        --output {file_out}'
-                subprocess.run(cmd, shell=True)
+    if   con is Contrast.pdw:  n_echo = n_pdw
+    elif con is Contrast.t1w:  n_echo = n_t1w
+    elif con is Contrast.mtw:  n_echo = n_mtw
+    elif con is Contrast.mt0:  n_echo = n_mt0
+    else: raise RuntimeError('contrast ?')
+
+    for echo in range(1,n_echo+1):
+        file_in  = denoising_dir /      f'den_{con}_e{echo}.nii'
+        file_out = moco_dir      / f'moco_den_{con}_e{echo}.nii'
+        if not file_out.exists():
+            logger.info(f'antsApplyTransforms {con} -> t1w : {file_out}')
+            cmd = f'antsApplyTransforms \
+                    --dimensionality 3 \
+                    --interpolation LanczosWindowedSinc \
+                    --input {file_in}\
+                    --reference-image {file_in} \
+                    --transform {mat} \
+                    --output {file_out}'
+            subprocess.run(cmd, shell=True)
                 
 
 #%% B1map
@@ -411,7 +417,7 @@ def fit_t2s_loglin_leastsquare(data: np.ndarray,
                                TE  : np.ndarray,
                                mask: np.ndarray,
                                method: str
-                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
+                               ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
 
     nx,ny,nz,ne = data.shape
     nvox = nx*ny*nz
@@ -424,18 +430,19 @@ def fit_t2s_loglin_leastsquare(data: np.ndarray,
     mask_flat = mask_flat > 0.1
     data_masked = data_2d[:,mask_flat]
 
-    b = np.log(data_masked)
+    # AX=B : here, X is [log(S0) -R2s]
+    b = np.log(data_masked) # [ne, nvox]
     b[~np.isfinite(b)] = 0
-    a = np.vstack( (np.ones(ne), TE) ).T
+    a = np.vstack( (np.ones(ne), TE) ).T # [ne, 2]
 
     if method == 'ols':
-        beta, err_flat, _, _ = np.linalg.lstsq( a, b )
+        beta, err_flat, _, _ = np.linalg.lstsq(a, b)
     elif method == 'wls':
         # weighted least square : use 1/TE as weight, as later echos have less SNR
         w = np.diag(np.sqrt(1/TE))
         wa = np.dot(w,a)
         wb = np.dot(w,b) 
-        beta, err_flat, _, _ = np.linalg.lstsq( wa, wb )
+        beta, err_flat, _, _ = np.linalg.lstsq(wa, wb)
 
         # weighted least square : use OLS residuals as weight -> not giving better results with the prio pre-processing
         # beta_ols, _, _, _ = np.linalg.lstsq( x, y )
@@ -481,21 +488,116 @@ def fit_t2s_loglin_leastsquare(data: np.ndarray,
 
     return s0, t2s, r2s, err
 
-def write_fit_t2s(img: nib.Nifti1Image,
+def write_fit_r2s(img: nib.Nifti1Image,
                   t2s: np.ndarray,
                   r2s: np.ndarray,
-                  path: pathlib.Path,
+                  s0 : np.ndarray,
+                  err: np.ndarray,
+                  path_r2s   : pathlib.Path,
+                  path_result: pathlib.Path,
                   suffix: str | None = None
                   ) -> None:
 
     img_T2s = nib.Nifti1Image(dataobj=t2s, affine=img.affine, header=img.header, dtype=np.float32)
     img_R2s = nib.Nifti1Image(dataobj=r2s, affine=img.affine, header=img.header, dtype=np.float32)
-    if suffix:
-        nib.save(img_T2s, path / f't2s_{suffix}.nii')
-        nib.save(img_R2s, path / f'r2s_{suffix}.nii')
-    else:
-        nib.save(img_T2s, path / f't2s.nii')
-        nib.save(img_R2s, path / f'r2s.nii')
+    img_S0  = nib.Nifti1Image(dataobj=s0 , affine=img.affine, header=img.header, dtype=np.float32)
+    img_ERR = nib.Nifti1Image(dataobj=err, affine=img.affine, header=img.header, dtype=np.float32)
+    if suffix: suffix = '_' + suffix
+    nib.save(img_T2s, path_result / f't2s{suffix}.nii')
+    nib.save(img_R2s, path_result / f'r2s{suffix}.nii')
+    nib.save(img_S0 , path_r2s    /  f's0{suffix}.nii')
+    nib.save(img_ERR, path_r2s    / f'err{suffix}.nii')
+
+
+def fit_t2s_estatics(data_mt0: np.ndarray, data_mtw: np.ndarray, data_pdw: np.ndarray, data_t1w: np.ndarray,
+                       TE_mt0: np.ndarray,   TE_mtw: np.ndarray,   TE_pdw: np.ndarray,   TE_t1w: np.ndarray,
+                     mask: np.ndarray,
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
+
+    N_CONTRAST = 4
+
+    nx,ny,nz = data_mt0.shape[:3]
+    nvox = nx*ny*nz
+    
+    mask_flat = np.reshape(mask, (nvox))
+    mask_flat = mask_flat > 0.1
+
+    data_mt0 = np.permute_dims(data_mt0, (3,0,1,2))
+    data_mtw = np.permute_dims(data_mtw, (3,0,1,2))
+    data_pdw = np.permute_dims(data_pdw, (3,0,1,2))
+    data_t1w = np.permute_dims(data_t1w, (3,0,1,2))
+
+    ne_mt0 = len(TE_mt0)
+    ne_mtw = len(TE_mtw)
+    ne_pdw = len(TE_pdw)
+    ne_t1w = len(TE_t1w)
+
+    data_2d_mt0 = np.reshape(data_mt0, (ne_mt0,nvox))
+    data_2d_mtw = np.reshape(data_mtw, (ne_mtw,nvox))
+    data_2d_pdw = np.reshape(data_pdw, (ne_pdw,nvox))
+    data_2d_t1w = np.reshape(data_t1w, (ne_t1w,nvox))
+    
+    data_masked_mt0 = data_2d_mt0[:,mask_flat]
+    data_masked_mtw = data_2d_mtw[:,mask_flat]
+    data_masked_pdw = data_2d_pdw[:,mask_flat]
+    data_masked_t1w = data_2d_t1w[:,mask_flat]
+
+    a_mt0 = np.zeros((ne_mt0, 1+N_CONTRAST))
+    a_mtw = np.zeros((ne_mtw, 1+N_CONTRAST))
+    a_pdw = np.zeros((ne_pdw, 1+N_CONTRAST))
+    a_t1w = np.zeros((ne_t1w, 1+N_CONTRAST))
+
+    a_mt0[:,0] = 1
+    a_mtw[:,1] = 1
+    a_pdw[:,2] = 1
+    a_t1w[:,3] = 1
+
+    a_mt0[:,-1] = TE_mt0
+    a_mtw[:,-1] = TE_mtw
+    a_pdw[:,-1] = TE_pdw
+    a_t1w[:,-1] = TE_t1w
+
+    a = np.vstack((          a_mt0,           a_mtw,           a_pdw,           a_t1w))
+    b = np.vstack((data_masked_mt0, data_masked_mtw, data_masked_pdw, data_masked_t1w))
+    b = np.log(b)
+    b[~np.isfinite(b)] = 0
+
+    beta, err_flat, _, _ = np.linalg.lstsq( a, b )
+
+    s0_flat_mt0 = np.exp(beta[0,:])
+    s0_flat_mtw = np.exp(beta[1,:])
+    s0_flat_pdw = np.exp(beta[2,:])
+    s0_flat_t1w = np.exp(beta[3,:])
+
+    r2s_flat = -beta[-1,:]
+    t2s_flat = 1/r2s_flat
+    r2s_flat[r2s_flat<0] = 0
+    t2s_flat[t2s_flat>1] = 0
+    t2s_flat[t2s_flat<0] = 0
+
+    s0_mt0  = np.zeros(nvox, dtype=np.float32)
+    s0_mtw  = np.zeros(nvox, dtype=np.float32)
+    s0_pdw  = np.zeros(nvox, dtype=np.float32)
+    s0_t1w  = np.zeros(nvox, dtype=np.float32)
+    r2s = np.zeros(nvox, dtype=np.float32)
+    t2s = np.zeros(nvox, dtype=np.float32)
+    err = np.zeros(nvox, dtype=np.float32)
+    s0_mt0[mask_flat] = s0_flat_mt0
+    s0_mtw[mask_flat] = s0_flat_mtw
+    s0_pdw[mask_flat] = s0_flat_pdw
+    s0_t1w[mask_flat] = s0_flat_t1w
+    r2s[mask_flat] = r2s_flat
+    t2s[mask_flat] = t2s_flat
+    err[mask_flat] = err_flat
+    s0_mt0  =  s0_mt0.reshape(nx,ny,nz)
+    s0_mtw  =  s0_mtw.reshape(nx,ny,nz)
+    s0_pdw  =  s0_pdw.reshape(nx,ny,nz)
+    s0_t1w  =  s0_t1w.reshape(nx,ny,nz)
+    r2s = r2s.reshape(nx,ny,nz)
+    t2s = t2s.reshape(nx,ny,nz)
+    err = err.reshape(nx,ny,nz)
+
+    return s0_mt0, s0_mtw, s0_pdw, s0_t1w, t2s, r2s, err
 
 
 #%% fit R2* // OLS
@@ -506,11 +608,10 @@ if r2s_ols.exists():
 else:
     img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
     data_mt0 = np.stack([img.get_fdata() for img in img_mt0], axis=3)
-    mask_mt0 = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    mask = nib.load(target_msk).get_fdata()
     te = [file.echo_time for file in raw_mt0]
-    
-    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0, te, mask_mt0, 'ols')
-    write_fit_t2s(img_mt0[0], t2s, r2s, results_dir, 'ols')
+    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0, te, mask, 'ols')
+    write_fit_r2s(img_mt0[0], t2s, r2s, s0, err, r2s_dir, results_dir, 'ols')
 
 
 #%% fit R2* // WLS
@@ -521,12 +622,10 @@ if r2s_wls.exists():
 else:
     img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
     data_mt0 = np.stack([img.get_fdata() for img in img_mt0], axis=3)
-    mask_mt0 = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    mask = nib.load(target_msk).get_fdata()
     te = np.array([file.echo_time for file in raw_mt0])
-
-    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0, te, mask_mt0, 'wls')
-
-    write_fit_t2s(img_mt0[0], t2s, r2s, results_dir, 'wls')
+    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0, te, mask, 'wls')
+    write_fit_r2s(img_mt0[0], t2s, r2s, s0, err, r2s_dir, results_dir, 'wls')
 
 
 #%% fit R2* // NumART
@@ -537,18 +636,50 @@ if r2s_numart.exists():
 else:
     img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
     data_mt0 = np.stack([img.get_fdata() for img in img_mt0], axis=3)
-    mask_mt0 = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
+    mask = nib.load(target_msk).get_fdata()
     te = [file.echo_time for file in raw_mt0]
 
     t2s = (te[-1]-te[0]) / (2*(len(te)-1)) \
         * ( (data_mt0[:,:,:,0] + data_mt0[:,:,:,-1]) + 2 * np.sum(data_mt0[:,:,:,1:-1], axis=3) ) \
         /   (data_mt0[:,:,:,0] - data_mt0[:,:,:,-1])
 
-    t2s *= mask_mt0
+    t2s *= mask
     r2s = 1/t2s
     t2s[t2s<0]    = 0
     t2s[t2s>1]    = 0
     r2s[r2s<0]    = 0
     r2s[r2s>1000] = 0
-    write_fit_t2s(img_mt0[0], t2s, r2s, results_dir, 'numart')
+    write_fit_r2s(img_mt0[0], t2s, r2s, r2s*0, r2s*0, r2s_dir, results_dir, 'numart')
 
+
+#%% fit R2* // ESTATICS
+
+r2s_estatics = results_dir / f'r2s_estatics.nii'
+if r2s_estatics.exists():
+    logger.info(f'Already exist: {r2s_estatics}')
+else:
+    img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
+    img_mtw = [nib.load(file.root / file.moco_nii) for file in raw_mtw]
+    img_pdw = [nib.load(file.root / file.moco_nii) for file in raw_pdw]
+    img_t1w = [nib.load(file.root / file. den_nii) for file in raw_t1w]
+    data_mt0 = np.stack([img.get_fdata() for img in img_mt0], axis=3)
+    data_mtw = np.stack([img.get_fdata() for img in img_mtw], axis=3)
+    data_pdw = np.stack([img.get_fdata() for img in img_pdw], axis=3)
+    data_t1w = np.stack([img.get_fdata() for img in img_t1w], axis=3)
+    mask = nib.load(target_msk).get_fdata()
+    te_mt0 = np.array([file.echo_time for file in raw_mt0])
+    te_mtw = np.array([file.echo_time for file in raw_mtw])
+    te_pdw = np.array([file.echo_time for file in raw_pdw])
+    te_t1w = np.array([file.echo_time for file in raw_t1w])
+    s0_mt0, s0_mtw, s0_pdw, s0_t1w, t2s, r2s, err = fit_t2s_estatics(
+        data_mt0=data_mt0, data_mtw=data_mtw, data_pdw=data_pdw, data_t1w=data_t1w,
+          TE_mt0=  te_mt0,   TE_mtw=  te_mtw,   TE_pdw=  te_pdw,   TE_t1w=  te_t1w,
+        mask=mask
+        )
+    write_fit_r2s(img_mt0[0], t2s, r2s, r2s*0, r2s*0, r2s_dir, results_dir, 'estatics')
+
+    nib.save(nib.Nifti1Image(dataobj=err   , affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir /    f'err_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_mt0, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f's0_mt0_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_mtw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f's0_mtw_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_pdw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f's0_pdw_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_t1w, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f's0_t1w_estatics.nii')
