@@ -488,26 +488,6 @@ def fit_t2s_loglin_leastsquare(data: np.ndarray,
 
     return s0, t2s, r2s, err
 
-def write_fit_r2s(img: nib.Nifti1Image,
-                  t2s: np.ndarray,
-                  r2s: np.ndarray,
-                  s0 : np.ndarray,
-                  err: np.ndarray,
-                  path_r2s   : pathlib.Path,
-                  path_result: pathlib.Path,
-                  suffix: str | None = None
-                  ) -> None:
-
-    img_T2s = nib.Nifti1Image(dataobj=t2s, affine=img.affine, header=img.header, dtype=np.float32)
-    img_R2s = nib.Nifti1Image(dataobj=r2s, affine=img.affine, header=img.header, dtype=np.float32)
-    img_S0  = nib.Nifti1Image(dataobj=s0 , affine=img.affine, header=img.header, dtype=np.float32)
-    img_ERR = nib.Nifti1Image(dataobj=err, affine=img.affine, header=img.header, dtype=np.float32)
-    if suffix: suffix = '_' + suffix
-    nib.save(img_T2s, path_result / f't2s{suffix}.nii')
-    nib.save(img_R2s, path_result / f'r2s{suffix}.nii')
-    nib.save(img_S0 , path_r2s    /  f's0{suffix}.nii')
-    nib.save(img_ERR, path_r2s    / f'err{suffix}.nii')
-
 
 def fit_t2s_estatics(data_mt0: np.ndarray, data_mtw: np.ndarray, data_pdw: np.ndarray, data_t1w: np.ndarray,
                        TE_mt0: np.ndarray,   TE_mtw: np.ndarray,   TE_pdw: np.ndarray,   TE_t1w: np.ndarray,
@@ -611,7 +591,9 @@ else:
     mask = nib.load(target_msk).get_fdata()
     te = [file.echo_time for file in raw_mt0]
     s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0, te, mask, 'ols')
-    write_fit_r2s(img_mt0[0], t2s, r2s, s0, err, r2s_dir, results_dir, 'ols')
+    nib.save(nib.Nifti1Image(dataobj=r2s, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f'r2s_mt0_ols.nii')
+    nib.save(nib.Nifti1Image(dataobj=t2s, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f't2s_mt0_ols.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0 , affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir /  f's0_mt0_ols.nii')
 
 
 #%% fit R2* // WLS
@@ -625,7 +607,9 @@ else:
     mask = nib.load(target_msk).get_fdata()
     te = np.array([file.echo_time for file in raw_mt0])
     s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0, te, mask, 'wls')
-    write_fit_r2s(img_mt0[0], t2s, r2s, s0, err, r2s_dir, results_dir, 'wls')
+    nib.save(nib.Nifti1Image(dataobj=r2s, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f'r2s_mt0_wls.nii')
+    nib.save(nib.Nifti1Image(dataobj=t2s, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f't2s_mt0_wls.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0 , affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir /  f's0_mt0_wls.nii')
 
 
 #%% fit R2* // NumART
@@ -649,7 +633,8 @@ else:
     t2s[t2s>1]    = 0
     r2s[r2s<0]    = 0
     r2s[r2s>1000] = 0
-    write_fit_r2s(img_mt0[0], t2s, r2s, r2s*0, r2s*0, r2s_dir, results_dir, 'numart')
+    nib.save(nib.Nifti1Image(dataobj=r2s, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f'r2s_mt0_numart.nii')
+    nib.save(nib.Nifti1Image(dataobj=t2s, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f't2s_mt0_numart.nii')
 
 
 #%% fit R2* // ESTATICS
@@ -676,10 +661,10 @@ else:
           TE_mt0=  te_mt0,   TE_mtw=  te_mtw,   TE_pdw=  te_pdw,   TE_t1w=  te_t1w,
         mask=mask
         )
-    write_fit_r2s(img_mt0[0], t2s, r2s, r2s*0, r2s*0, r2s_dir, results_dir, 'estatics')
 
-    nib.save(nib.Nifti1Image(dataobj=err   , affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir /    f'err_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=s0_mt0, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f's0_mt0_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=s0_mtw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f's0_mtw_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=s0_pdw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f's0_pdw_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=s0_t1w, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir / f's0_t1w_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=r2s   , affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), results_dir / f'r2s_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=t2s   , affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), results_dir / f't2s_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_mt0, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_mt0_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_mtw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_mtw_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_pdw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_pdw_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_t1w, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_t1w_estatics.nii')
