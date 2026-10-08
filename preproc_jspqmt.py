@@ -567,6 +567,8 @@ r2s_estatics = results_dir / f'r2s_estatics.nii'
 if r2s_estatics.exists():
     logger.info(f'Already exist: {r2s_estatics}')
 else:
+    logger.info(f'R2s fit with ESTATICS method (multi contrast)')
+
     img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
     img_mtw = [nib.load(file.root / file.moco_nii) for file in raw_mtw]
     img_pdw = [nib.load(file.root / file.moco_nii) for file in raw_pdw]
@@ -580,7 +582,7 @@ else:
     te_mtw = np.array([file.echo_time for file in raw_mtw])
     te_pdw = np.array([file.echo_time for file in raw_pdw])
     te_t1w = np.array([file.echo_time for file in raw_t1w])
-    
+
     s0_mt0, s0_mtw, s0_pdw, s0_t1w, t2s, r2s, err = fit_t2s_estatics(
         data_mt0=data_mt0, data_mtw=data_mtw, data_pdw=data_pdw, data_t1w=data_t1w,
           TE_mt0=  te_mt0,   TE_mtw=  te_mtw,   TE_pdw=  te_pdw,   TE_t1w=  te_t1w,
@@ -594,6 +596,8 @@ else:
     nib.save(nib.Nifti1Image(dataobj=s0_pdw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_pdw_estatics.nii')
     nib.save(nib.Nifti1Image(dataobj=s0_t1w, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_t1w_estatics.nii')
 
+    logger.info(f'Wrote: {r2s_estatics}')
+
 
 #%% fit R2* // OLS + WLS + NumART on all contrasts, just to compare
 
@@ -603,6 +607,8 @@ for con in Contrast:
     if r2s_ols.exists():
         logger.info(f'Already exist: {r2s_ols}')
     else:
+        logger.info(f'R2s **single contrast** fits for {con}')
+
         if   con is Contrast.mt0:  files = raw_mt0
         elif con is Contrast.mtw:  files = raw_mtw
         elif con is Contrast.pdw:  files = raw_pdw
@@ -633,3 +639,5 @@ for con in Contrast:
         r2s[r2s>1000] = 0
         nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_numart.nii')
         nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_numart.nii')
+
+        logger.info(f'Wrote on disk all R2s **single contrast** fits for {con}')
