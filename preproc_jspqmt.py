@@ -385,9 +385,10 @@ else:
 
 #%% fit R2* // OLS
 
-def fit_t2s_ols(data: np.ndarray,
-                TE: np.ndarray,
-                mask: np.ndarray
+def fit_t2s_loglin_leastsquare(data: np.ndarray,
+                                TE  : np.ndarray,
+                                mask: np.ndarray,
+                                method: str
                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
 
     nx,ny,nz,ne = data.shape
@@ -401,7 +402,36 @@ def fit_t2s_ols(data: np.ndarray,
     y = np.log(data_masked).T
     y[~np.isfinite(y)] = 0
     x = np.array([np.ones(ne), TE]).T
-    beta, err_flat, _, _ = np.linalg.lstsq( x, y )
+
+    if method == 'ols':
+        beta, err_flat, _, _ = np.linalg.lstsq( x, y )
+    elif method == 'wls':
+        # weighted least square : use 1/TE as weight, as later echos have less SNR
+        w = np.diag(np.sqrt(1/TE))
+        xw = np.dot(w,x)
+        yw = np.dot(w,y) 
+        beta, err_flat, _, _ = np.linalg.lstsq( xw, yw )
+
+        # weighted least square : use OLS residuals as weight -> not giving better results with the prio pre-processing
+        # beta_ols, _, _, _ = np.linalg.lstsq( x, y )
+        # err_ols = y - x @ beta_ols
+        # beta     = np.zeros((2,nvox_flat))
+        # err_flat = np.zeros((nvox_flat))
+        # check: int = round(nvox_flat / 10)
+        # c: int = 0
+        # print(f'WLS : {0}%')
+        # for ivox in range(nvox_flat):
+        #     if ivox == check * (c+1):
+        #         c+=1
+        #         print(f'WLS : {10*c}%')
+        #     w = np.diag(1 / err_ols[:,ivox])
+        #     xw = np.dot(w,x)
+        #     yw = np.dot(y[:,ivox],w) 
+        #     b, e, _, _ = np.linalg.lstsq( xw, yw )
+        #     beta[:,ivox] = b
+        #     err_flat[ivox] = e[0]
+    else:
+        raise RuntimeError(f'bad t2s fit method: {method}')
 
     s0_flat = np.exp(beta[0,:])
 
@@ -451,7 +481,7 @@ else:
     mask_mt0_den = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
     te = [file.echo_time for file in raw_mt0]
     
-    s0, t2s, r2s, err = fit_t2s_ols(data_mt0_den, te, mask_mt0_den)
+    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0_den, te, mask_mt0_den, 'ols')
     write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir, 'ols')
 
 r2s_img = results_dir / f'r2s_ols.nii'
@@ -516,70 +546,6 @@ else:
         
 #%% fit R2* // WLS
 
-def fit_t2s_wls(data: np.ndarray,
-                TE: np.ndarray,
-                mask: np.ndarray
-                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
-
-    nx,ny,nz,ne = data.shape
-    nvox = nx*ny*nz
-    data_2d = np.reshape(data, (nvox,ne))
-    mask_flat = np.reshape(mask, (nvox))
-
-    mask_flat = mask_flat > 0.1
-    data_masked = data_2d[mask_flat]
-    nvox_flat = np.count_nonzero(mask_flat)
-
-    y = np.log(data_masked).T
-    y[~np.isfinite(y)] = 0
-    x = np.array([np.ones(ne), TE]).T
-
-    w = np.diag(np.sqrt(1/TE))
-    xw = np.dot(w,x)
-    yw = np.dot(w,y) 
-    beta, err_flat, _, _ = np.linalg.lstsq( xw, yw )
-
-    # beta_ols, _, _, _ = np.linalg.lstsq( x, y )
-    # err_ols = y - x @ beta_ols
-    # beta     = np.zeros((2,nvox_flat))
-    # err_flat = np.zeros((nvox_flat))
-    # check: int = round(nvox_flat / 10)
-    # c: int = 0
-    # print(f'WLS : {0}%')
-    # for ivox in range(nvox_flat):
-    #     if ivox == check * (c+1):
-    #         c+=1
-    #         print(f'WLS : {10*c}%')
-    #     w = np.diag(1 / err_ols[:,ivox])
-    #     xw = np.dot(w,x)
-    #     yw = np.dot(y[:,ivox],w) 
-    #     b, e, _, _ = np.linalg.lstsq( xw, yw )
-    #     beta[:,ivox] = b
-    #     err_flat[ivox] = e[0]
-
-    s0_flat = np.exp(beta[0,:])
-
-    r2s_flat = -beta[1,:]
-    t2s_flat = 1/r2s_flat
-    r2s_flat[r2s_flat<0] = 0
-    t2s_flat[t2s_flat>1] = 0
-    t2s_flat[t2s_flat<0] = 0
-
-    s0  = np.zeros(nvox, dtype=np.float32)
-    r2s = np.zeros(nvox, dtype=np.float32)
-    t2s = np.zeros(nvox, dtype=np.float32)
-    err = np.zeros(nvox, dtype=np.float32)
-    s0 [mask_flat] = s0_flat
-    r2s[mask_flat] = r2s_flat
-    t2s[mask_flat] = t2s_flat
-    err[mask_flat] = err_flat
-    s0  =  s0.reshape(nx,ny,nz)
-    r2s = r2s.reshape(nx,ny,nz)
-    t2s = t2s.reshape(nx,ny,nz)
-    err = err.reshape(nx,ny,nz)
-
-    return s0, t2s, r2s, err
-
 r2s_wls = r2s_dir / f'r2s_wls.nii'
 if r2s_wls.exists():
     logger.info(f'Already exist: {r2s_wls}')
@@ -589,7 +555,7 @@ else:
     mask_mt0_den = nib.load(masking_dir / f'mask_den_mt0_rms.nii').get_fdata()
     te = np.array([file.echo_time for file in raw_mt0])
 
-    s0, t2s, r2s, err = fit_t2s_wls(data_mt0_den, te, mask_mt0_den)
+    s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data_mt0_den, te, mask_mt0_den, 'wls')
 
     write_fit_t2s(img_mt0_den[0], t2s, r2s, r2s_dir, 'wls')
 
