@@ -608,15 +608,22 @@ for con in Contrast:
         logger.info(f'Already exist: {r2s_ols}')
     else:
         logger.info(f'R2s **single contrast** fits for {con}')
-
-        if   con is Contrast.mt0:  files = raw_mt0
-        elif con is Contrast.mtw:  files = raw_mtw
-        elif con is Contrast.pdw:  files = raw_pdw
-        elif con is Contrast.t1w:  files = raw_t1w
-        imgs = [nib.load(file.root / file. den_nii) for file in files]
-        data = np.stack([img.get_fdata() for img in imgs], axis=3)
         mask = nib.load(target_msk).get_fdata()
-        te = np.array([file.echo_time for file in files])
+
+        if   con is Contrast.mt0:
+            imgs = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
+            te = np.array([file.echo_time for file in raw_mt0])
+        elif con is Contrast.mtw:
+            imgs = [nib.load(file.root / file.moco_nii) for file in raw_mtw]
+            te = np.array([file.echo_time for file in raw_mtw])
+        elif con is Contrast.pdw:
+            imgs = [nib.load(file.root / file.moco_nii) for file in raw_pdw]
+            te = np.array([file.echo_time for file in raw_pdw])
+        elif con is Contrast.t1w:
+            imgs = [nib.load(file.root / file. den_nii) for file in raw_t1w]
+            te = np.array([file.echo_time for file in raw_t1w])
+        
+        data = np.stack([img.get_fdata() for img in imgs], axis=3)
 
         s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data, te, mask, 'ols')
         nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_ols.nii')
