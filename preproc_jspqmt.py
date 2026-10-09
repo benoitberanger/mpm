@@ -13,6 +13,30 @@ main_dir = pathlib.Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/20
 path_size_pca = 5 # default value 5, while 7 is noisier
 rms_num_echos = 1 # use first echo, no need for RMS with 3 echos
 
+JSPqMT: dict = {
+    'MTw_TIMINGS':{
+        'SatPulseDuration'     :      12.0  , # Saturation pulse duration (ms)
+        'Interdelay'           :       2.1  , # Interdelay between Saturation pulse and Readout pulse (ms)
+        'ReadoutPulseDuration' :       0.250, # Readout pulse duration (ms)
+        'TR'                   :      30.0  , # Sequence Time-to-Repetition (TR; ms)
+    },
+    'VFA_TIMINGS':{
+        'ReadoutPulseDuration' :       0.250, # Readout pulse duration (ms)
+        'TR'                   :      30.0  , # Sequence Time-to-Repetition (TR; ms)
+    },
+    'MTw_PARX':{
+        'ReadoutFA'            :      14.0  , # Readout flip angle of MT0/MTw (deg; single common value)
+        'ReadoutPulseShape'    : 'BP'       , # Readout pulse shape (Hann, BP)
+        'SaturationFA'         :     560.0  , # Saturation pulse flip angle (deg)
+        'SaturationOffset'     :    4000.0  , # Saturation pulse off-resonance frequency (Hz)
+        'SaturationPulseShape' : 'Hann-Sine', # Saturation pulse shape (Hann-Sine, GaussHann-Sine, Gauss-Sine)
+    },
+    'VFA_PARX':{
+        'ReadoutFA'            : [6.0, 33.0], # Readout flip angles [VFA1, VFA2, ..., VFAn] (deg; same order as in provided VFA volume(s))
+        'ReadoutPulseShape'    : 'BP'       , # Readout pulse shape (Hann, BP)
+    }
+}
+
 work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}'
 regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9$')
 regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9$')
@@ -341,7 +365,6 @@ for con in Contrast:
         subprocess.run(cmd, shell=True)
 
     if   con is Contrast.pdw:  n_echo = n_pdw
-    elif con is Contrast.t1w:  n_echo = n_t1w
     elif con is Contrast.mtw:  n_echo = n_mtw
     elif con is Contrast.mt0:  n_echo = n_mt0
     else: raise RuntimeError('contrast ?')
@@ -396,15 +419,23 @@ r1f = results_dir / 'r1f.nii'
 if t1f.exists():
     logger.info(f'fit-JSPqMT done: {t1f}')
 else:
+    d = JSPqMT['MTw_TIMINGS'] # shortcut
+    MTW_TIMINGS: str  = f"{d['SatPulseDuration']},{d['Interdelay']},{d['ReadoutPulseDuration']},{d['TR']}"
+    d = JSPqMT['VFA_TIMINGS'] # shortcut
+    VFA_TIMINGS: str  = f"{d['ReadoutPulseDuration']},{d['TR']}"
+    d = JSPqMT['MTw_PARX'] # shortcut
+    MTW_PARX: str  = f"{d['ReadoutFA']},{d['ReadoutPulseShape']},{d['SaturationFA']},{d['SaturationOffset']},{d['SaturationPulseShape']}"
+    d = JSPqMT['VFA_PARX'] # shortcut
+    VFA_PARX: str  = f"{','.join(map(str,d['ReadoutFA']))},{d['ReadoutPulseShape']}"
+
     cmd = f'fit-JSPqMT {mt0},{mtw} {pdw},{t1w} {mpf} {t1f} \
             --R1f {r1f} \
             --mask {target_msk} \
             --B1 {b1map_smoothed} \
-            --MTw_TIMINGS 12.0,2.1,0.25,30.0 \
-            --VFA_TIMINGS 0.25,30.0 \
-            --VFA_PARX 6.0,33.0,BP \
-            --MTw_PARX 14.0,BP,560.0,4000.0,Hann-Sine \
-            --qMTconstraint_PARX 0.0158,10.0e-6,21.1 \
+            --MTw_TIMINGS {MTW_TIMINGS} \
+            --VFA_TIMINGS {VFA_TIMINGS} \
+            --MTw_PARX {MTW_PARX} \
+            --VFA_PARX {VFA_PARX} \
             --use_GBM \
             --nworkers {os.cpu_count()} \
             --cpp_opt'
@@ -568,6 +599,7 @@ if r2s_estatics.exists():
     logger.info(f'Already exist: {r2s_estatics}')
 else:
     logger.info(f'R2s fit with ESTATICS method (multi contrast)')
+    mask = nib.load(target_msk).get_fdata()
 
     img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
     img_mtw = [nib.load(file.root / file.moco_nii) for file in raw_mtw]
@@ -577,7 +609,6 @@ else:
     data_mtw = np.stack([img.get_fdata() for img in img_mtw], axis=3)
     data_pdw = np.stack([img.get_fdata() for img in img_pdw], axis=3)
     data_t1w = np.stack([img.get_fdata() for img in img_t1w], axis=3)
-    mask = nib.load(target_msk).get_fdata()
     te_mt0 = np.array([file.echo_time for file in raw_mt0])
     te_mtw = np.array([file.echo_time for file in raw_mtw])
     te_pdw = np.array([file.echo_time for file in raw_pdw])
@@ -610,19 +641,10 @@ for con in Contrast:
         logger.info(f'R2s **single contrast** fits for {con}')
         mask = nib.load(target_msk).get_fdata()
 
-        if   con is Contrast.mt0:
-            imgs = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
-            te = np.array([file.echo_time for file in raw_mt0])
-        elif con is Contrast.mtw:
-            imgs = [nib.load(file.root / file.moco_nii) for file in raw_mtw]
-            te = np.array([file.echo_time for file in raw_mtw])
-        elif con is Contrast.pdw:
-            imgs = [nib.load(file.root / file.moco_nii) for file in raw_pdw]
-            te = np.array([file.echo_time for file in raw_pdw])
-        elif con is Contrast.t1w:
-            imgs = [nib.load(file.root / file. den_nii) for file in raw_t1w]
-            te = np.array([file.echo_time for file in raw_t1w])
-        
+        if   con is Contrast.mt0: imgs = [nib.load(file.root / file.moco_nii) for file in raw_mt0]; te = np.array([file.echo_time for file in raw_mt0])
+        elif con is Contrast.mtw: imgs = [nib.load(file.root / file.moco_nii) for file in raw_mtw]; te = np.array([file.echo_time for file in raw_mtw])
+        elif con is Contrast.pdw: imgs = [nib.load(file.root / file.moco_nii) for file in raw_pdw]; te = np.array([file.echo_time for file in raw_pdw])
+        elif con is Contrast.t1w: imgs = [nib.load(file.root / file. den_nii) for file in raw_t1w]; te = np.array([file.echo_time for file in raw_t1w])
         data = np.stack([img.get_fdata() for img in imgs], axis=3)
 
         s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data, te, mask, 'ols')
