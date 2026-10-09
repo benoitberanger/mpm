@@ -228,23 +228,22 @@ raw_b1map: File = raw_b1map[0]
 
 #%% Prepare qMT images : concatenate all raw images, for easy visual QC
 
-logger.info(f'Loading header raw_mt0'); img_mt0_raw = [nib.load(file.root / file.raw_nii) for file in raw_mt0]
-logger.info(f'Loading header raw_mtw'); img_mtw_raw = [nib.load(file.root / file.raw_nii) for file in raw_mtw]
-logger.info(f'Loading header raw_pdw'); img_pdw_raw = [nib.load(file.root / file.raw_nii) for file in raw_pdw]
-logger.info(f'Loading header raw_t1w'); img_t1w_raw = [nib.load(file.root / file.raw_nii) for file in raw_t1w]
-
-logger.info(f'Loading data raw_mt0'); data_mt0_raw = np.stack([img.get_fdata() for img in img_mt0_raw], axis=3)
-logger.info(f'Loading data raw_mtw'); data_mtw_raw = np.stack([img.get_fdata() for img in img_mtw_raw], axis=3)
-logger.info(f'Loading data raw_pdw'); data_pdw_raw = np.stack([img.get_fdata() for img in img_pdw_raw], axis=3)
-logger.info(f'Loading data raw_t1w'); data_t1w_raw = np.stack([img.get_fdata() for img in img_t1w_raw], axis=3)
-
 path_qmt_raw = denoising_dir / '4D_raw.nii'
 if path_qmt_raw.exists():
-    logger.info(f'Loading raw 4D : {path_qmt_raw}')    
-    img_qmt_raw = nib.load(path_qmt_raw)
-    data_qmt_raw = img_qmt_raw.get_fdata()
+    logger.info(f'Already done raw 4D : {path_qmt_raw}')    
 else:
     logger.info(f'Stacking raw images into single 4D')
+    
+    logger.info(f'Loading header raw_mt0'); img_mt0_raw = [nib.load(file.root / file.raw_nii) for file in raw_mt0]
+    logger.info(f'Loading header raw_mtw'); img_mtw_raw = [nib.load(file.root / file.raw_nii) for file in raw_mtw]
+    logger.info(f'Loading header raw_pdw'); img_pdw_raw = [nib.load(file.root / file.raw_nii) for file in raw_pdw]
+    logger.info(f'Loading header raw_t1w'); img_t1w_raw = [nib.load(file.root / file.raw_nii) for file in raw_t1w]
+
+    logger.info(f'Loading data raw_mt0'); data_mt0_raw = np.stack([img.get_fdata() for img in img_mt0_raw], axis=3)
+    logger.info(f'Loading data raw_mtw'); data_mtw_raw = np.stack([img.get_fdata() for img in img_mtw_raw], axis=3)
+    logger.info(f'Loading data raw_pdw'); data_pdw_raw = np.stack([img.get_fdata() for img in img_pdw_raw], axis=3)
+    logger.info(f'Loading data raw_t1w'); data_t1w_raw = np.stack([img.get_fdata() for img in img_t1w_raw], axis=3)
+
     data_qmt_raw = np.concat((data_mt0_raw, data_mtw_raw, data_pdw_raw, data_t1w_raw), axis=3)
     logger.info(f'data_qmt_raw shape is {data_qmt_raw.shape}')
 
@@ -269,9 +268,6 @@ else:
             {path_qmt_den} '
     subprocess.run(cmd, shell=True)
 
-img_qmt_den = nib.load(path_qmt_den)
-data_qmt_den = img_qmt_den.get_fdata()
-
 
 #%% De-concatenante
 
@@ -279,6 +275,9 @@ for idx in range(len(raw_qmt)):
     if raw_qmt[idx].den_nii.exists():
         logger.info(f'Already exist: {raw_qmt[idx].den_nii.stem}[.nii, .json]')
     else:
+        if 'img_qmt_den' not in locals():
+            img_qmt_den = nib.load(path_qmt_den)
+            data_qmt_den = img_qmt_den.get_fdata()
         data= data_qmt_den[:,:,:,idx]
         img_den = nib.Nifti1Image(
             dataobj=data,
