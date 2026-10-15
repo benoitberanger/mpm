@@ -166,26 +166,28 @@ data_MPM_raw = np.concat((data_PD_raw, data_MT_raw, data_T1_raw), axis=3)
 logger.info(f'data_raw shape is {data_MPM_raw.shape}')
 
 path_MPM_raw = work_dir / 'data_MPM_raw.nii'
-img_raw = nib.Nifti1Image(
-    dataobj=data_MPM_raw,
-    affine=img_PD_raw[0].affine,
-    header=img_PD_raw[0].header)
-img_raw.header['dim'][0] = 4
-logger.info(f'Writing raw 4D images in disk: {path_MPM_raw}'); nib.save(img_raw, path_MPM_raw)
+if not path_MPM_raw.exists():
+    img_raw = nib.Nifti1Image(
+        dataobj=data_MPM_raw,
+        affine=img_PD_raw[0].affine,
+        header=img_PD_raw[0].header)
+    img_raw.header['dim'][0] = 4
+    logger.info(f'Writing raw 4D images in disk: {path_MPM_raw}'); nib.save(img_raw, path_MPM_raw)
 
 
 #%% Run tMPPCA
 
 path_MPM_den = work_dir / 'data_MPM_den.nii'
-sys.argv = [
-    'denoise-tmppca',
-    '--sigma2'  , str(work_dir /   'sigma2.nii'),
-    '--snr_gain', str(work_dir / 'snr_gain.nii'),
-    '--window', '5,5,5',
-    str(path_MPM_raw),
-    str(path_MPM_den)
-]
-denoise_tmppca_cli.main()
+if not path_MPM_den.exists():
+    sys.argv = [
+        'denoise-tmppca',
+        '--sigma2'  , str(work_dir /   'sigma2.nii'),
+        '--snr_gain', str(work_dir / 'snr_gain.nii'),
+        '--window', '5,5,5',
+        str(path_MPM_raw),
+        str(path_MPM_den)
+    ]
+    denoise_tmppca_cli.main()
 
 
 #%% Deconcatenate MPM denoised data
@@ -197,14 +199,29 @@ data_MPM_den = img_MPM_den.get_fdata()
 N = n_PD + n_MT + n_T1
 
 for n in range(N):
-    data_echo = data_MPM_den[:,:,:,n]
-    img_den = nib.Nifti1Image(
-        dataobj=data_echo,
-        affine=img_MPM_den.affine,
-        header=img_MPM_den.header)
-    logger.info(f'Writing {raw_MPM[n].den_nii.stem}[.nii, .json]')
-    nib.save(img_den, raw_MPM[n].den_nii)
-    shutil.copyfile(raw_MPM[n].raw_json,raw_MPM[n].den_json)
+    if not raw_MPM[n].den_nii.exists():
+        data_echo = data_MPM_den[:,:,:,n]
+        img_den = nib.Nifti1Image(
+            dataobj=data_echo,
+            affine=img_MPM_den.affine,
+            header=img_MPM_den.header)
+        logger.info(f'Writing {raw_MPM[n].den_nii.stem}[.nii, .json]')
+        nib.save(img_den, raw_MPM[n].den_nii)
+        shutil.copyfile(raw_MPM[n].raw_json,raw_MPM[n].den_json)
+
+
+#%% MPRAGElike
+
+path_MPRAGElike = work_dir / 'MPRAGElike.nii'
+if not path_MPRAGElike.exists():
+    PDw = nib.load(raw_PD[0].den_nii).get_fdata()
+    MTw = nib.load(raw_MT[0].den_nii).get_fdata()
+    T1w = nib.load(raw_T1[0].den_nii).get_fdata()
+
+    alpha = 100
+    data_MPRAGElike = (T1w - alpha) / (0.5 * (PDw + MTw) + alpha)
+
+    nib.save(nib.Nifti1Image(dataobj=data_MPRAGElike,affine=img_MPM_den.affine,header=img_MPM_den.header), path_MPRAGElike)
+
 
 logger.info(f'All done')
-
