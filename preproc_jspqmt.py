@@ -136,7 +136,7 @@ rms_dir       = work_dir / '02_RMS'
 masking_dir   = work_dir / '03_Masking'
 moco_dir      = work_dir / '04_MotionCorrection'
 b1map_dir     = work_dir / '05_B1map'
-r2s_dir       = work_dir / '05_R2s'
+r2s_dir       = work_dir / '06_R2s'
 denoising_dir.mkdir(parents=True, exist_ok=True)
 rms_dir      .mkdir(parents=True, exist_ok=True)
 masking_dir  .mkdir(parents=True, exist_ok=True)
@@ -448,7 +448,7 @@ def fit_t2s_loglin_leastsquare(data: np.ndarray,
                                mask: np.ndarray,
                                method: str
                                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
-
+    
     nx,ny,nz,ne = data.shape
     nvox = nx*ny*nz
     
@@ -461,7 +461,7 @@ def fit_t2s_loglin_leastsquare(data: np.ndarray,
     data_masked = data_2d[:,mask_flat]
 
     # AX=B : here, X is [log(S0) -R2s]
-    b = np.log(data_masked) # [ne, nvox]
+    with np.errstate(divide='ignore',invalid='ignore'): b = np.log(data_masked) # [ne, nvox]
     b[~np.isfinite(b)] = 0
     a = np.vstack( (np.ones(ne), TE) ).T # [ne, 2]
 
@@ -479,7 +479,7 @@ def fit_t2s_loglin_leastsquare(data: np.ndarray,
     s0_flat = np.exp(beta[0,:])
 
     r2s_flat = -beta[1,:]
-    t2s_flat = 1/r2s_flat
+    with np.errstate(divide='ignore',invalid='ignore'): t2s_flat = 1/r2s_flat
     r2s_flat[r2s_flat<0] = 0
     t2s_flat[t2s_flat>1] = 0
     t2s_flat[t2s_flat<0] = 0
@@ -550,7 +550,7 @@ def fit_t2s_estatics(data_mt0: np.ndarray, data_mtw: np.ndarray, data_pdw: np.nd
 
     a = np.vstack((          a_mt0,           a_mtw,           a_pdw,           a_t1w))
     b = np.vstack((data_masked_mt0, data_masked_mtw, data_masked_pdw, data_masked_t1w))
-    b = np.log(b)
+    with np.errstate(divide='ignore',invalid='ignore'): b = np.log(b)
     b[~np.isfinite(b)] = 0
 
     beta, err_flat, _, _ = np.linalg.lstsq( a, b )
@@ -591,6 +591,36 @@ def fit_t2s_estatics(data_mt0: np.ndarray, data_mtw: np.ndarray, data_pdw: np.nd
     return s0_mt0, s0_mtw, s0_pdw, s0_t1w, t2s, r2s, err
 
 
+def fit_t2s_arlo(data: np.ndarray,
+                 TE  : np.ndarray,
+                 mask: np.ndarray,
+                 ) -> tuple[np.ndarray, np.ndarray] :
+    
+    nx,ny,nz,ne = data.shape
+    dTE = np.diff(TE).mean()
+
+    # in the paper, J=2, it means take echos #0 #1 #2, so a triplet
+    nt = ne - 2 # numer of triplets
+    Si = np.zeros((nx,ny,nz,nt), dtype=np.float32)
+    Di = np.zeros((nx,ny,nz,nt), dtype=np.float32)
+
+    for t in range(nt):
+        Si[:,:,:,t] = (data[:,:,:,t] + 4*data[:,:,:,t+1] + data[:,:,:,t+2]) * dTE/3
+        Di[:,:,:,t] =  data[:,:,:,t]                     - data[:,:,:,t+2]
+
+    with np.errstate(divide='ignore',invalid='ignore'): 
+        t2s = (        np.sum(Si*Si,axis=-1) + dTE/3 * np.sum(Si*Di,axis=-1)) \
+            / (dTE/3 * np.sum(Si*Si,axis=-1) +         np.sum(Si*Di,axis=-1))
+        
+    t2s *= mask
+    with np.errstate(divide='ignore',invalid='ignore'): r2s = 1/t2s
+    t2s[t2s<0]    = 0
+    t2s[t2s>1]    = 0
+    r2s[r2s<0]    = 0
+    r2s[r2s>1000] = 0
+    return t2s, r2s
+
+
 #%% fit R2* // ESTATICS
 
 r2s_estatics = results_dir / f'r2s_estatics.nii'
@@ -629,7 +659,7 @@ else:
     logger.info(f'Wrote: {r2s_estatics}')
 
 
-#%% fit R2* // OLS + WLS + NumART on all contrasts, just to compare
+#%% fit R2* // OLS + WLS + NumART + ARLO on all contrasts, just to compare
 
 for con in Contrast:
 
@@ -656,11 +686,12 @@ for con in Contrast:
         nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_wls.nii')
         nib.save(nib.Nifti1Image(dataobj=s0 , affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir /  f's0_{con}_wls.nii')
 
-        t2s = (te[-1]-te[0]) / (2*(len(te)-1)) \
-        * ( (data[:,:,:,0] + data[:,:,:,-1]) + 2 * np.sum(data[:,:,:,1:-1], axis=3) ) \
-        /   (data[:,:,:,0] - data[:,:,:,-1])
-        t2s *= mask
-        r2s = 1/t2s
+        with np.errstate(divide='ignore',invalid='ignore'): 
+            t2s = (te[-1]-te[0]) / (2*(len(te)-1)) \
+            * ( (data[:,:,:,0] + data[:,:,:,-1]) + 2 * np.sum(data[:,:,:,1:-1], axis=3) ) \
+            /   (data[:,:,:,0] - data[:,:,:,-1])
+            t2s *= mask
+            r2s = 1/t2s
         t2s[t2s<0]    = 0
         t2s[t2s>1]    = 0
         r2s[r2s<0]    = 0
@@ -668,4 +699,7 @@ for con in Contrast:
         nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_numart.nii')
         nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_numart.nii')
 
+        t2s, r2s = fit_t2s_arlo(data, te, mask)
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_arlo.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_arlo.nii')
         logger.info(f'Wrote on disk all R2s **single contrast** fits for {con}')
