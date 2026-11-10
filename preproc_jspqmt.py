@@ -71,15 +71,22 @@ logger = logging.getLogger()
 logger.info(f'main_dir: {main_dir}')
 
 
+class Contrast(enum.StrEnum):
+    mt0 = 'mt0'
+    mtw = 'mtw'
+    pdw = 'pdw'
+    t1w = 't1w'
+
+
 class File:
 
     def __init__(self) -> None:
-        self.is_mag         : bool          = None
-        self.is_b1map       : bool          = False
-        self.contrast       : Contrast      = None
-        self.echo_number    : int           = None
-        self.echo_time      : float         = None
-        self.info           : dict          = None
+        self.is_mag         : bool     = None
+        self.is_b1map       : bool     = False
+        self.contrast       : Contrast = None
+        self.echo_number    : int      = None
+        self.echo_time      : float    = None
+        self.info           : dict     = None
 
     def __repr__(self)        -> str : return str(self.__dict__)
     def __lt__  (self, other) -> bool: return self.echo_time < other.echo_time
@@ -119,11 +126,32 @@ class File:
     @moco_json.setter
     def moco_json(self, value): self._moco_json = pathlib.Path(value)
 
-class Contrast(enum.StrEnum):
-    mt0 = 'mt0'
-    mtw = 'mtw'
-    pdw = 'pdw'
-    t1w = 't1w'
+
+class ContrastMP:
+    def __init__(self):
+        self.m: list
+        self.p: list
+
+    def __len__(self):
+        return len(self.m)
+
+
+class MPMContainer(dict):
+    def __init__(self):
+        self.mt0: ContrastMP = ContrastMP()
+        self.mtw: ContrastMP = ContrastMP()
+        self.pdw: ContrastMP = ContrastMP()
+        self.t1w: ContrastMP = ContrastMP()
+
+        self._count : int = -1
+        self._offset: int =  0
+
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+
+    def __len__(self):
+        return len(self.mt0) + len(self.mtw) + len(self.pdw) + len(self.t1w)
 
 
 #%% Prepare dirs
@@ -137,12 +165,14 @@ masking_dir   = work_dir / '03_Masking'
 moco_dir      = work_dir / '04_MotionCorrection'
 b1map_dir     = work_dir / '05_B1map'
 r2s_dir       = work_dir / '06_R2s'
+qsm_dir       = work_dir / '07_QSM'
 denoising_dir.mkdir(parents=True, exist_ok=True)
 rms_dir      .mkdir(parents=True, exist_ok=True)
 masking_dir  .mkdir(parents=True, exist_ok=True)
 moco_dir     .mkdir(parents=True, exist_ok=True)
 b1map_dir    .mkdir(parents=True, exist_ok=True)
 r2s_dir      .mkdir(parents=True, exist_ok=True)
+qsm_dir      .mkdir(parents=True, exist_ok=True)
 
 results_dir = work_dir / 'Results'
 results_dir.mkdir(parents=True, exist_ok=True)
@@ -165,15 +195,15 @@ for root, dirs, files in os.walk(main_dir):
                 with open(jsonfile,'r') as fid:
                     new.info = json.load(fid)
             if regex_mt0.match(root) or regex_mtw.match(root) or regex_pdw.match(root) or regex_t1w.match(root):
-                if   new.info['ImageType'][2] == 'M': new.is_mag = True
-                elif new.info['ImageType'][2] == 'P': new.is_mag = False
+                if   new.info['ImageType'][2] == 'M': new.is_mag = True;  mp = 'm'
+                elif new.info['ImageType'][2] == 'P': new.is_mag = False; mp = 'p' 
                 new.echo_number = new.info['EchoNumber']
                 new.echo_time   = new.info['EchoTime']
                 if regex_mt0.match(root): new.contrast = Contrast.mt0
                 if regex_mtw.match(root): new.contrast = Contrast.mtw
                 if regex_pdw.match(root): new.contrast = Contrast.pdw
                 if regex_t1w.match(root): new.contrast = Contrast.t1w
-                new.den_nii = denoising_dir / f'den_{new.contrast}_e{new.echo_number}.nii'
+                new.den_nii = denoising_dir /  f'den_{new.contrast}_e{new.echo_number}_{mp}.nii'
                 new.den_json = new.den_nii.with_suffix('.json')
                 new.moco_nii = moco_dir / f'moco_{new.den_nii.name}'
                 new.moco_json = new.moco_nii.with_suffix('.json')
@@ -182,43 +212,20 @@ for root, dirs, files in os.walk(main_dir):
                 new.is_b1map = True
                 raw_sources.append(new)
 
-raw_mag = list(filter(lambda x: x.is_mag==True, raw_sources))
-
-raw_mt0 = list(filter(lambda x: x.contrast==Contrast.mt0, raw_mag))
-raw_mtw = list(filter(lambda x: x.contrast==Contrast.mtw, raw_mag))
-raw_pdw = list(filter(lambda x: x.contrast==Contrast.pdw, raw_mag))
-raw_t1w = list(filter(lambda x: x.contrast==Contrast.t1w, raw_mag))
-
-raw_mt0 = sorted(raw_mt0)
-raw_mtw = sorted(raw_mtw)
-raw_pdw = sorted(raw_pdw)
-raw_t1w = sorted(raw_t1w)
-
-raw_qmt = raw_mt0 + raw_mtw + raw_pdw + raw_t1w
-
-n_mt0 = len(raw_mt0)
-n_mtw = len(raw_mtw)
-n_pdw = len(raw_pdw)
-n_t1w = len(raw_t1w)
-
-if n_mt0 < 1: raise FileNotFoundError(f'no raw_mt0 found with {main_dir / regex_mt0.pattern / regex_rawnifti.pattern}')
-if n_mtw < 1: raise FileNotFoundError(f'no raw_mtw found with {main_dir / regex_mtw.pattern / regex_rawnifti.pattern}')
-if n_pdw < 1: raise FileNotFoundError(f'no raw_pdw found with {main_dir / regex_pdw.pattern / regex_rawnifti.pattern}')
-if n_t1w < 1: raise FileNotFoundError(f'no raw_t1w found with {main_dir / regex_t1w.pattern / regex_rawnifti.pattern}')
-logger.info(f'found n_mt0={n_mt0} raw_mtw magnitudes')
-logger.info(f'found n_mtw={n_mtw} raw_mtw magnitudes')
-logger.info(f'found n_pdw={n_pdw} raw_pdw magnitudes')
-logger.info(f'found n_t1w={n_t1w} raw_t1w magnitudes')
-if n_mt0 < rms_num_echos: raise ValueError(f'not enough {n_mt0}/{rms_num_echos} echos for mt0')
-if n_mtw < rms_num_echos: raise ValueError(f'not enough {n_mt0}/{rms_num_echos} echos for mtw')
-if n_pdw < rms_num_echos: raise ValueError(f'not enough {n_mt0}/{rms_num_echos} echos for pdw')
-if n_t1w < rms_num_echos: raise ValueError(f'not enough {n_mt0}/{rms_num_echos} echos for t1w')
-
-logger.info(f'mt0 // sorted TE = {[round(file.echo_time*1000,3) for file in raw_mt0]}(ms)')
-logger.info(f'mtw // sorted TE = {[round(file.echo_time*1000,3) for file in raw_mtw]}(ms)')
-logger.info(f'pdw // sorted TE = {[round(file.echo_time*1000,3) for file in raw_pdw]}(ms)')
-logger.info(f't1w // sorted TE = {[round(file.echo_time*1000,3) for file in raw_t1w]}(ms)')
-
+raw_mag   = list(filter(lambda x: x.is_mag==True , raw_sources))
+raw_pha   = list(filter(lambda x: x.is_mag==False, raw_sources))
+files = MPMContainer()
+for con in Contrast:
+    files[con].m = list(filter(lambda x: x.contrast==con, raw_mag))
+    files[con].p = list(filter(lambda x: x.contrast==con, raw_pha))
+    files[con].m = sorted(files[con].m)
+    files[con].p = sorted(files[con].p)
+    if len(files[con].m) < 1: raise FileNotFoundError(f'{con} // magnitude not found with {main_dir / regex_mt0.pattern / regex_rawnifti.pattern}')
+    if len(files[con].p) < 1: raise FileNotFoundError(f'{con} // phase     not found with {main_dir / regex_mt0.pattern / regex_rawnifti.pattern}')
+    logger.info(f'{con} // found {len(files[con].m)} magnitudes')
+    logger.info(f'{con} // found {len(files[con].p)} phases')
+    if len(files[con].m) < rms_num_echos: raise ValueError(f'{con} // not enough echos for RMS: {len(files[con].m)}/{rms_num_echos}')
+    logger.info(f'{con} // sorted TE = {[round(file.echo_time*1000,3) for file in files[con].m]}(ms)')
 
 raw_b1map: list[File] = list(filter(lambda x: x.is_b1map==True, raw_sources))
 if len(raw_b1map) < 1: raise FileNotFoundError(f'no raw_b1map found with {main_dir / regex_b1map.pattern / regex_rawnifti.pattern}')
@@ -226,66 +233,78 @@ if len(raw_b1map) > 1: raise FileNotFoundError(f'too many raw_b1map found with {
 raw_b1map: File = raw_b1map[0]
 
 
-#%% Prepare qMT images : concatenate all raw images, for easy visual QC
+#%% Prepare some containers and shortcuts
 
-path_qmt_raw = denoising_dir / '4D_raw.nii'
-if path_qmt_raw.exists():
-    logger.info(f'Already done raw 4D : {path_qmt_raw}')    
+fileorder_4D_m:list[File] = []
+fileorder_4D_p:list[File] = []
+for con in Contrast:
+    for file in files[con].m: fileorder_4D_m.append(file)
+    for file in files[con].p: fileorder_4D_p.append(file) 
+
+
+#%% Concatenate all raw images (mag+pĥa)
+
+
+path_4D_raw = denoising_dir / '4D_raw.nii'
+if path_4D_raw.exists():
+    logger.info(f'Already done raw 4D : {path_4D_raw}')    
 else:
     logger.info(f'Stacking raw images into single 4D')
     
-    logger.info(f'Loading header raw_mt0'); img_mt0_raw = [nib.load(file.root / file.raw_nii) for file in raw_mt0]
-    logger.info(f'Loading header raw_mtw'); img_mtw_raw = [nib.load(file.root / file.raw_nii) for file in raw_mtw]
-    logger.info(f'Loading header raw_pdw'); img_pdw_raw = [nib.load(file.root / file.raw_nii) for file in raw_pdw]
-    logger.info(f'Loading header raw_t1w'); img_t1w_raw = [nib.load(file.root / file.raw_nii) for file in raw_t1w]
+    img_raw    = MPMContainer()
+    data_raw   = MPMContainer()
+    data_raw_c = MPMContainer()
 
-    logger.info(f'Loading data raw_mt0'); data_mt0_raw = np.stack([img.get_fdata() for img in img_mt0_raw], axis=3)
-    logger.info(f'Loading data raw_mtw'); data_mtw_raw = np.stack([img.get_fdata() for img in img_mtw_raw], axis=3)
-    logger.info(f'Loading data raw_pdw'); data_pdw_raw = np.stack([img.get_fdata() for img in img_pdw_raw], axis=3)
-    logger.info(f'Loading data raw_t1w'); data_t1w_raw = np.stack([img.get_fdata() for img in img_t1w_raw], axis=3)
+    for con in Contrast:
+        logger.info(f'Loading header files[{con}].m');  img_raw[con].m = [nib.load(file.root / file.raw_nii) for file in   files[con].m]
+        logger.info(f'Loading header files[{con}].p');  img_raw[con].p = [nib.load(file.root / file.raw_nii) for file in   files[con].p]
+        logger.info(f'Loading data   files[{con}].m'); data_raw[con].m = np.stack([img.get_fdata()           for img  in img_raw[con].m], axis=3)
+        logger.info(f'Loading data   files[{con}].p'); data_raw[con].p = np.stack([img.get_fdata()           for img  in img_raw[con].p], axis=3)
+        data_raw[con].p *= np.pi / 4096 # rescale Siemens phase [-4096 4095] to radian
+        data_raw_c[con] = data_raw[con].m * np.exp(1j * data_raw[con].p)
 
-    data_qmt_raw = np.concat((data_mt0_raw, data_mtw_raw, data_pdw_raw, data_t1w_raw), axis=3)
-    logger.info(f'data_qmt_raw shape is {data_qmt_raw.shape}')
-
-    img_qmt_raw = nib.Nifti1Image(
-        dataobj=data_qmt_raw,
-        affine=img_t1w_raw[0].affine,
-        header=img_t1w_raw[0].header)
-    img_qmt_raw.header['dim'][0] = 4
-    logger.info(f'Writing raw 4D images in disk: {path_qmt_raw}'); nib.save(img_qmt_raw, path_qmt_raw)
+    data_raw_ri = np.concat((np.real(data_raw_c.mt0), np.real(data_raw_c.mtw), np.real(data_raw_c.pdw), np.real(data_raw_c.t1w),
+                             np.imag(data_raw_c.mt0), np.imag(data_raw_c.mtw), np.imag(data_raw_c.pdw), np.imag(data_raw_c.t1w)), axis=3)
+    img_raw_ri = nib.Nifti1Image(
+            dataobj=data_raw_ri,
+            affine=img_raw.mt0.m[0].affine,
+            header=img_raw.mt0.m[0].header,
+            dtype=np.float32)
+    img_raw_ri.header['dim'][0] = 4
+    logger.info(f'Writing raw Re Im 4D images in disk: {path_4D_raw}');
+    nib.save(img_raw_ri, path_4D_raw)
 
 
 #%% Run tMPPCA
 
-path_qmt_den = denoising_dir / '4D_den.nii'
-if path_qmt_den.exists():
-    logger.info(f'tMPPCA already done : {path_qmt_den}')
+path_4D_den = denoising_dir / '4D_den.nii'
+if path_4D_den.exists():
+    logger.info(f'tMPPCA already done : {path_4D_den}')
 else:
     cmd = f'denoise-tmppca \
             --num_threads {os.cpu_count()} \
             --window {path_size_pca},{path_size_pca},{path_size_pca} \
-            {path_qmt_raw} \
-            {path_qmt_den} '
+            {path_4D_raw} \
+            {path_4D_den} '
     subprocess.run(cmd, shell=True)
 
 
 #%% De-concatenante
 
-for idx in range(len(raw_qmt)):
-    if raw_qmt[idx].den_nii.exists():
-        logger.info(f'Already exist: {raw_qmt[idx].den_nii.stem}[.nii, .json]')
+for idx in range(len(files)):
+    if fileorder_4D_m[idx].den_nii.exists():
+        logger.info(f'Already exist: {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]')
     else:
-        if 'img_qmt_den' not in locals():
-            img_qmt_den = nib.load(path_qmt_den)
-            data_qmt_den = img_qmt_den.get_fdata()
-        data= data_qmt_den[:,:,:,idx]
-        img_den = nib.Nifti1Image(
-            dataobj=data,
-            affine=img_qmt_den.affine,
-            header=img_qmt_den.header)
-        logger.info(f'Writing {raw_qmt[idx].den_nii.stem}[.nii, .json]')
-        nib.save(img_den, raw_qmt[idx].den_nii)
-        shutil.copyfile(raw_qmt[idx].raw_json,raw_qmt[idx].den_json)
+        img_den_ri = nib.load(path_4D_den)
+        data_den_ri = img_den_ri.get_fdata()
+        data_r = data_den_ri[:,:,:,idx             ]
+        data_i = data_den_ri[:,:,:,idx + len(files)]
+        data_c = data_r + 1j*data_i
+        refimg = nib.load(fileorder_4D_m[idx].raw_nii)
+        img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c), affine=refimg.affine, header=refimg.header)
+        img_den_p = nib.Nifti1Image(dataobj=np.angle(data_c), affine=refimg.affine, header=refimg.header)
+        logger.info(f'Writing MAG {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]'); nib.save(img_den_m, fileorder_4D_m[idx].den_nii); shutil.copyfile(fileorder_4D_m[idx].raw_json,fileorder_4D_m[idx].den_json)
+        logger.info(f'Writing PHA {fileorder_4D_p[idx].den_nii.stem}[.nii, .json]'); nib.save(img_den_p, fileorder_4D_p[idx].den_nii); shutil.copyfile(fileorder_4D_p[idx].raw_json,fileorder_4D_p[idx].den_json)
 
 
 #%% Root Mean Square of the first echos
@@ -295,7 +314,7 @@ for con in Contrast:
     if fpath.exists():
         logger.info(f'Already exist: {fpath}')
     else:
-        file_stack = list(filter(lambda x: x.contrast==con, raw_mag))
+        file_stack = files[con].m
         file_stack = file_stack[:rms_num_echos]
         img_stack = [nib.load(file.root / file.den_nii) for file in file_stack]
         data_stack = np.stack([img.get_fdata() for img in img_stack], axis=3)
@@ -321,18 +340,18 @@ for con in Contrast:
 
 #%% Motion correction
         
-target_img = rms_dir     /      'den_t1w_rms.nii'
-target_msk = masking_dir / 'mask_den_t1w_rms.nii'
+target_img = rms_dir     /      'den_mt0_rms.nii'
+target_msk = masking_dir / 'mask_den_mt0_rms.nii'
 
 for con in Contrast:
-    if con is Contrast.t1w: continue
+    if con is Contrast.mt0: continue
     
     moving_img = rms_dir     / f'den_{con}_rms.nii'
     moving_msk = masking_dir / f'mask_{fpath.name}'
 
     mat = moco_dir / f'ants_{con}_0GenericAffine.mat'
     if not mat.exists():
-        logger.info(f'antsRegistration {con} -> t1w : {moving_img}')
+        logger.info(f'antsRegistration {con} -> mt0 : {moving_img}')
 
         cmd = f'antsRegistration \
                 --dimensionality 3 \
@@ -353,7 +372,7 @@ for con in Contrast:
 
     moco_img = moco_dir / f'moco_den_{con}_rms.nii'
     if not moco_img.exists():
-        logger.info(f'antsApplyTransforms {con} -> t1w : {moco_img}')
+        logger.info(f'antsApplyTransforms {con} -> mt0 : {moco_img}')
         cmd = f'antsApplyTransforms \
                 --dimensionality 3 \
                 --interpolation LanczosWindowedSinc \
@@ -363,14 +382,11 @@ for con in Contrast:
                 --output {moco_img}'
         subprocess.run(cmd, shell=True)
 
-    if   con is Contrast.pdw:  n_echo = n_pdw
-    elif con is Contrast.mtw:  n_echo = n_mtw
-    elif con is Contrast.mt0:  n_echo = n_mt0
-    else: raise RuntimeError('contrast ?')
+    n_echo = len(files[con])
 
     for echo in range(1,n_echo+1):
-        file_in  = denoising_dir /      f'den_{con}_e{echo}.nii'
-        file_out = moco_dir      / f'moco_den_{con}_e{echo}.nii'
+        file_in  = denoising_dir /      f'den_{con}_e{echo}_m.nii'
+        file_out = moco_dir      / f'moco_den_{con}_e{echo}_m.nii'
         if not file_out.exists():
             logger.info(f'antsApplyTransforms {con} -> t1w : {file_out}')
             cmd = f'antsApplyTransforms \
@@ -407,10 +423,10 @@ else:
 
 #%% Fit
 
-mt0 = moco_dir    / 'moco_den_mt0_rms.nii'
+mt0 = rms_dir     /      'den_mt0_rms.nii'
 mtw = moco_dir    / 'moco_den_mtw_rms.nii'
 pdw = moco_dir    / 'moco_den_pdw_rms.nii'
-t1w = rms_dir     /      'den_t1w_rms.nii'
+t1w = moco_dir    / 'moco_den_t1w_rms.nii'
 mpf = results_dir / 'mpf.nii'
 t1f = results_dir / 't1f.nii'
 r1f = results_dir / 'r1f.nii'
@@ -630,31 +646,36 @@ else:
     logger.info(f'R2s fit with ESTATICS method (multi contrast)')
     mask = nib.load(target_msk).get_fdata()
 
-    img_mt0 = [nib.load(file.root / file.moco_nii) for file in raw_mt0]
-    img_mtw = [nib.load(file.root / file.moco_nii) for file in raw_mtw]
-    img_pdw = [nib.load(file.root / file.moco_nii) for file in raw_pdw]
-    img_t1w = [nib.load(file.root / file. den_nii) for file in raw_t1w]
-    data_mt0 = np.stack([img.get_fdata() for img in img_mt0], axis=3)
-    data_mtw = np.stack([img.get_fdata() for img in img_mtw], axis=3)
-    data_pdw = np.stack([img.get_fdata() for img in img_pdw], axis=3)
-    data_t1w = np.stack([img.get_fdata() for img in img_t1w], axis=3)
-    te_mt0 = np.array([file.echo_time for file in raw_mt0])
-    te_mtw = np.array([file.echo_time for file in raw_mtw])
-    te_pdw = np.array([file.echo_time for file in raw_pdw])
-    te_t1w = np.array([file.echo_time for file in raw_t1w])
+    imgs = MPMContainer()
+    data = MPMContainer()
+    te   = MPMContainer()
+    imgs.mt0.m = [nib.load(file.root / file. den_nii) for file in files.mt0.m]
+    imgs.mtw.m = [nib.load(file.root / file.moco_nii) for file in files.mtw.m]
+    imgs.pdw.m = [nib.load(file.root / file.moco_nii) for file in files.pdw.m]
+    imgs.t1w.m = [nib.load(file.root / file.moco_nii) for file in files.t1w.m]
+    data.mt0.m = np.stack([img.get_fdata() for img in imgs.mt0.m], axis=3)
+    data.mtw.m = np.stack([img.get_fdata() for img in imgs.mtw.m], axis=3)
+    data.pdw.m = np.stack([img.get_fdata() for img in imgs.pdw.m], axis=3)
+    data.t1w.m = np.stack([img.get_fdata() for img in imgs.t1w.m], axis=3)
+    te.mt0.m = np.array([file.echo_time for file in files.mt0.m])
+    te.mtw.m = np.array([file.echo_time for file in files.mtw.m])
+    te.pdw.m = np.array([file.echo_time for file in files.pdw.m])
+    te.t1w.m = np.array([file.echo_time for file in files.t1w.m])
+    affine = imgs.mtw.m[0].affine
+    header = imgs.mtw.m[0].header
 
     s0_mt0, s0_mtw, s0_pdw, s0_t1w, t2s, r2s, err = fit_t2s_estatics(
-        data_mt0=data_mt0, data_mtw=data_mtw, data_pdw=data_pdw, data_t1w=data_t1w,
-          TE_mt0=  te_mt0,   TE_mtw=  te_mtw,   TE_pdw=  te_pdw,   TE_t1w=  te_t1w,
+        data_mt0=data.mt0.m, data_mtw=data.mtw.m, data_pdw=data.pdw.m, data_t1w=data.t1w.m,
+          TE_mt0=  te.mt0.m,   TE_mtw=  te.mtw.m,   TE_pdw=  te.pdw.m,   TE_t1w=  te.t1w.m,
         mask=mask
         )
     
-    nib.save(nib.Nifti1Image(dataobj=r2s   , affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), results_dir / f'r2s_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=t2s   , affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), results_dir / f't2s_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=s0_mt0, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_mt0_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=s0_mtw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_mtw_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=s0_pdw, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_pdw_estatics.nii')
-    nib.save(nib.Nifti1Image(dataobj=s0_t1w, affine=img_mt0[0].affine, header=img_mt0[0].header, dtype=np.float32), r2s_dir     / f's0_t1w_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=r2s   , affine=affine, header=header, dtype=np.float32), results_dir / f'r2s_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=t2s   , affine=affine, header=header, dtype=np.float32), results_dir / f't2s_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_mt0, affine=affine, header=header, dtype=np.float32), r2s_dir     / f's0_mt0_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_mtw, affine=affine, header=header, dtype=np.float32), r2s_dir     / f's0_mtw_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_pdw, affine=affine, header=header, dtype=np.float32), r2s_dir     / f's0_pdw_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_t1w, affine=affine, header=header, dtype=np.float32), r2s_dir     / f's0_t1w_estatics.nii')
 
     logger.info(f'Wrote: {r2s_estatics}')
 
@@ -670,10 +691,10 @@ for con in Contrast:
         logger.info(f'R2s **single contrast** fits for {con}')
         mask = nib.load(target_msk).get_fdata()
 
-        if   con is Contrast.mt0: imgs = [nib.load(file.root / file.moco_nii) for file in raw_mt0]; te = np.array([file.echo_time for file in raw_mt0])
-        elif con is Contrast.mtw: imgs = [nib.load(file.root / file.moco_nii) for file in raw_mtw]; te = np.array([file.echo_time for file in raw_mtw])
-        elif con is Contrast.pdw: imgs = [nib.load(file.root / file.moco_nii) for file in raw_pdw]; te = np.array([file.echo_time for file in raw_pdw])
-        elif con is Contrast.t1w: imgs = [nib.load(file.root / file. den_nii) for file in raw_t1w]; te = np.array([file.echo_time for file in raw_t1w])
+        if   con is Contrast.mt0: imgs = [nib.load(file.root / file. den_nii) for file in files.mt0.m]; te = np.array([file.echo_time for file in files.mt0.m])
+        elif con is Contrast.mtw: imgs = [nib.load(file.root / file.moco_nii) for file in files.mtw.m]; te = np.array([file.echo_time for file in files.mtw.m])
+        elif con is Contrast.pdw: imgs = [nib.load(file.root / file.moco_nii) for file in files.pdw.m]; te = np.array([file.echo_time for file in files.pdw.m])
+        elif con is Contrast.t1w: imgs = [nib.load(file.root / file.moco_nii) for file in files.t1w.m]; te = np.array([file.echo_time for file in files.t1w.m])
         data = np.stack([img.get_fdata() for img in imgs], axis=3)
 
         s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data, te, mask, 'ols')
@@ -703,3 +724,4 @@ for con in Contrast:
         nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_arlo.nii')
         nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_arlo.nii')
         logger.info(f'Wrote on disk all R2s **single contrast** fits for {con}')
+
