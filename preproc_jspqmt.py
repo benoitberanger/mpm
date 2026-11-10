@@ -129,8 +129,8 @@ class File:
 
 class ContrastMP:
     def __init__(self):
-        self.m: list
-        self.p: list
+        self.m: list = []
+        self.p: list = []
 
     def __len__(self):
         return len(self.m)
