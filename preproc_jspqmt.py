@@ -37,7 +37,7 @@ JSPqMT: dict = {
     }
 }
 
-work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}'
+work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}_unwrap_cplx'
 regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9$')
 regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9$')
 regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9$')
@@ -159,13 +159,15 @@ class MPMContainer(dict):
 work_dir.mkdir(parents=True, exist_ok=True)
 logger.info(f'work_dir is : {work_dir}')
 
-denoising_dir = work_dir / '01_Denoising'
-rms_dir       = work_dir / '02_RMS'
-masking_dir   = work_dir / '03_Masking'
-moco_dir      = work_dir / '04_MotionCorrection'
-b1map_dir     = work_dir / '05_B1map'
-r2s_dir       = work_dir / '06_R2s'
-qsm_dir       = work_dir / '07_QSM'
+unwrap_dir    = work_dir / '01_Unwrap'
+denoising_dir = work_dir / '02_Denoising'
+rms_dir       = work_dir / '03_RMS'
+masking_dir   = work_dir / '04_Masking'
+moco_dir      = work_dir / '05_MotionCorrection'
+b1map_dir     = work_dir / '06_B1map'
+r2s_dir       = work_dir / '07_R2s'
+qsm_dir       = work_dir / '08_QSM'
+unwrap_dir   .mkdir(parents=True, exist_ok=True)
 denoising_dir.mkdir(parents=True, exist_ok=True)
 rms_dir      .mkdir(parents=True, exist_ok=True)
 masking_dir  .mkdir(parents=True, exist_ok=True)
@@ -242,8 +244,28 @@ for con in Contrast:
     for file in files[con].p: fileorder_4D_p.append(file) 
 
 
-#%% Concatenate all raw images (mag+pĥa)
+#%% Unwrap the phase
+for con in Contrast:
 
+    mag  = files[con].m[0].raw_nii
+    mask = unwrap_dir / f'mask_{con}.nii'
+    if mask.exists():
+        logger.info(f'Already exist: {mask}')
+    else:
+        subprocess.run(f'mri_synthstrip --image {mag} --mask {mask} --border 2', shell=True)
+
+    for file in files[con].p:
+        phase_in = file.raw_nii
+        phase_out = unwrap_dir / f'unwrap_{con}_e{file.echo_number}_p.nii'
+        if not phase_out.exists():
+            cmd = f'qsmxt unwrap laplacian \
+                    --mask {mask}          \
+                    --output {phase_out}   \
+                    {phase_in}'
+            subprocess.run(cmd, shell=True)
+
+
+#%% Concatenate all raw images (mag+pĥa)
 
 path_4D_raw = denoising_dir / '4D_raw.nii'
 if path_4D_raw.exists():
@@ -257,10 +279,10 @@ else:
 
     for con in Contrast:
         logger.info(f'Loading header files[{con}].m');  img_raw[con].m = [nib.load(file.root / file.raw_nii) for file in   files[con].m]
-        logger.info(f'Loading header files[{con}].p');  img_raw[con].p = [nib.load(file.root / file.raw_nii) for file in   files[con].p]
+        logger.info(f'Loading header files[{con}].p');  img_raw[con].p = [nib.load(unwrap_dir / f'unwrap_{con}_e{file.echo_number}_p.nii') for file in   files[con].p]
         logger.info(f'Loading data   files[{con}].m'); data_raw[con].m = np.stack([img.get_fdata()           for img  in img_raw[con].m], axis=3)
         logger.info(f'Loading data   files[{con}].p'); data_raw[con].p = np.stack([img.get_fdata()           for img  in img_raw[con].p], axis=3)
-        data_raw[con].p *= np.pi / 4096 # rescale Siemens phase [-4096 4095] to radian
+        # data_raw[con].p *= np.pi / 4096 # rescale Siemens phase [-4096 4095] to radian
         data_raw_c[con] = data_raw[con].m * np.exp(1j * data_raw[con].p)
 
     data_raw_ri = np.concat((np.real(data_raw_c.mt0), np.real(data_raw_c.mtw), np.real(data_raw_c.pdw), np.real(data_raw_c.t1w),
@@ -282,6 +304,7 @@ if path_4D_den.exists():
     logger.info(f'tMPPCA already done : {path_4D_den}')
 else:
     cmd = f'denoise-tmppca \
+            --mask {mask} \
             --num_threads {os.cpu_count()} \
             --window {path_size_pca},{path_size_pca},{path_size_pca} \
             {path_4D_raw} \
