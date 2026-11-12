@@ -37,7 +37,7 @@ JSPqMT: dict = {
     }
 }
 
-work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}'
+work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}_cplx2'
 regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9$')
 regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9$')
 regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9$')
@@ -263,30 +263,34 @@ else:
         data_raw[con].p *= np.pi / 4096 # rescale Siemens phase [-4096 4095] to radian
         data_raw_c[con] = data_raw[con].m * np.exp(1j * data_raw[con].p)
 
-    data_raw_ri = np.concat((np.real(data_raw_c.mt0), np.real(data_raw_c.mtw), np.real(data_raw_c.pdw), np.real(data_raw_c.t1w),
-                             np.imag(data_raw_c.mt0), np.imag(data_raw_c.mtw), np.imag(data_raw_c.pdw), np.imag(data_raw_c.t1w)), axis=3)
+    data_raw_ri = np.concat((data_raw_c.mt0, data_raw_c.mtw, data_raw_c.pdw, data_raw_c.t1w), axis=3)
     img_raw_ri = nib.Nifti1Image(
             dataobj=data_raw_ri,
             affine=img_raw.mt0.m[0].affine,
             header=img_raw.mt0.m[0].header,
-            dtype=np.float32)
+            dtype=np.complex64)
     img_raw_ri.header['dim'][0] = 4
     logger.info(f'Writing raw Re Im 4D images in disk: {path_4D_raw}');
     nib.save(img_raw_ri, path_4D_raw)
 
 
-#%% Run tMPPCA
+#%% Run dwidenoise2
 
 path_4D_den = denoising_dir / '4D_den.nii'
 if path_4D_den.exists():
-    logger.info(f'tMPPCA already done : {path_4D_den}')
+    logger.info(f'dwidenoise already done : {path_4D_den}')
 else:
-    cmd = f'denoise-tmppca \
-            --num_threads {os.cpu_count()} \
-            --window {path_size_pca},{path_size_pca},{path_size_pca} \
-            {path_4D_raw} \
-            {path_4D_den} '
+    #shutil.copyfile(path_4D_raw,f'/tmp/{path_4D_raw.name}')
+    # cmd = f'docker run -it --rm \
+    #     --user {os.getuid()}:{os.getgid()} \
+    #     -v /tmp:/data \
+    #     dwidenoise2:latest \
+    #     dwidenoise2 \
+    #     /data/4D_raw.nii /data/4D_den.nii'
+    cmd = f'dwidenoise \
+        {path_4D_raw} {path_4D_den}'
     subprocess.run(cmd, shell=True)
+    #shutil.copyfile('/tmp/4D_den.nii',path_4D_den)
 
 
 #%% De-concatenante
@@ -295,14 +299,11 @@ for idx in range(len(files)):
     if fileorder_4D_m[idx].den_nii.exists():
         logger.info(f'Already exist: {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]')
     else:
-        img_den_ri = nib.load(path_4D_den)
-        data_den_ri = img_den_ri.get_fdata()
-        data_r = data_den_ri[:,:,:,idx             ]
-        data_i = data_den_ri[:,:,:,idx + len(files)]
-        data_c = data_r + 1j*data_i
+        img_den_c = nib.load(path_4D_den)
+        data_c = img_den_c.get_fdata(dtype=np.complex64)
         refimg = nib.load(fileorder_4D_m[idx].raw_nii)
-        img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c), affine=refimg.affine, header=refimg.header)
-        img_den_p = nib.Nifti1Image(dataobj=np.angle(data_c), affine=refimg.affine, header=refimg.header)
+        img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c[:,:,:,idx]), affine=refimg.affine, header=refimg.header)
+        img_den_p = nib.Nifti1Image(dataobj=np.angle(data_c[:,:,:,idx]), affine=refimg.affine, header=refimg.header)
         logger.info(f'Writing MAG {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]'); nib.save(img_den_m, fileorder_4D_m[idx].den_nii); shutil.copyfile(fileorder_4D_m[idx].raw_json,fileorder_4D_m[idx].den_json)
         logger.info(f'Writing PHA {fileorder_4D_p[idx].den_nii.stem}[.nii, .json]'); nib.save(img_den_p, fileorder_4D_p[idx].den_nii); shutil.copyfile(fileorder_4D_p[idx].raw_json,fileorder_4D_p[idx].den_json)
 
