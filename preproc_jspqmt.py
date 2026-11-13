@@ -37,7 +37,7 @@ JSPqMT: dict = {
     }
 }
 
-work_dir = main_dir / f'jspqmt_c9_patch{path_size_pca}_rms{rms_num_echos}'
+work_dir = main_dir / f'jspqmt_c9'
 regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9$')
 regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9$')
 regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9$')
@@ -268,10 +268,11 @@ if not mask_4D.exists():
 
 #%% Concatenate all raw images mag:tMPPCA & complex:dwidenoise
 
-path_4D_raw_m = denoising_dir / '4D_raw_m.nii'
-path_4D_raw_c = denoising_dir / '4D_raw_c.nii'
-if path_4D_raw_c.exists():
-    logger.info(f'Already done raw 4D : {path_4D_raw_c}')    
+path_4D_raw_m  = denoising_dir / '4D_raw_m.nii'
+path_4D_raw_cx = denoising_dir / '4D_raw_cx.nii'
+path_4D_raw_ri = denoising_dir / '4D_raw_ri.nii'
+if path_4D_raw_cx.exists():
+    logger.info(f'Already done raw 4D : {path_4D_raw_cx}')    
 else:
     logger.info(f'Stacking raw images into single 4D')
     
@@ -287,16 +288,19 @@ else:
         data_raw[con].p *= np.pi / 4096 # rescale Siemens phase [-4096 4095] to radian
         data_raw_c[con] = data_raw[con].m * np.exp(1j * data_raw[con].p)
 
-    data_raw_m = np.concat((data_raw.mt0.m, data_raw.mtw.m, data_raw.pdw.m, data_raw.t1w.m), axis=3)
-    data_raw_c = np.concat((data_raw_c.mt0, data_raw_c.mtw, data_raw_c.pdw, data_raw_c.t1w), axis=3)
-    # data_raw_ri = np.concat((np.real(data_raw_c.mt0), np.real(data_raw_c.mtw), np.real(data_raw_c.pdw), np.real(data_raw_c.t1w),
-    #                          np.imag(data_raw_c.mt0), np.imag(data_raw_c.mtw), np.imag(data_raw_c.pdw), np.imag(data_raw_c.t1w)), axis=3)
+    data_raw_m  = np.concat((data_raw.mt0.m, data_raw.mtw.m, data_raw.pdw.m, data_raw.t1w.m), axis=3)
+    data_raw_cx = np.concat((data_raw_c.mt0, data_raw_c.mtw, data_raw_c.pdw, data_raw_c.t1w), axis=3)
+    data_raw_ri = np.concat((np.real(data_raw_c.mt0), np.real(data_raw_c.mtw), np.real(data_raw_c.pdw), np.real(data_raw_c.t1w),
+                             np.imag(data_raw_c.mt0), np.imag(data_raw_c.mtw), np.imag(data_raw_c.pdw), np.imag(data_raw_c.t1w)), axis=3)
     img_raw_m = nib.Nifti1Image(dataobj=data_raw_m, affine=img_raw.mt0.m[0].affine, header=img_raw.mt0.m[0].header, dtype=np.float32)
     img_raw_m.header['dim'][0] = 4
-    logger.info(f'Writing raw Re Im 4D images in disk: {path_4D_raw_m}'); nib.save(img_raw_m, path_4D_raw_m)
-    img_raw_c = nib.Nifti1Image(dataobj=data_raw_c, affine=img_raw.mt0.m[0].affine, header=img_raw.mt0.m[0].header, dtype=np.complex64)
-    img_raw_c.header['dim'][0] = 4
-    logger.info(f'Writing raw Complex 4D images in disk: {path_4D_raw_c}'); nib.save(img_raw_c, path_4D_raw_c)
+    logger.info(f'Writing raw Mag 4D images in disk: {path_4D_raw_m}'); nib.save(img_raw_m, path_4D_raw_m)
+    img_raw_cx = nib.Nifti1Image(dataobj=data_raw_cx, affine=img_raw.mt0.m[0].affine, header=img_raw.mt0.m[0].header, dtype=np.complex64)
+    img_raw_cx.header['dim'][0] = 4
+    logger.info(f'Writing raw Complex 4D images in disk: {path_4D_raw_cx}'); nib.save(img_raw_cx, path_4D_raw_cx)
+    img_raw_ri = nib.Nifti1Image(dataobj=data_raw_ri, affine=img_raw.mt0.m[0].affine, header=img_raw.mt0.m[0].header, dtype=np.float32)
+    img_raw_ri.header['dim'][0] = 4
+    logger.info(f'Writing raw Re Im 4D images in disk: {path_4D_raw_ri}'); nib.save(img_raw_ri, path_4D_raw_ri)
 
 
 #%% Run tMPPCA
@@ -316,30 +320,74 @@ else:
 
 #%% Run dwidenoise
 
-path_4D_den_c = denoising_dir / '4D_den_c.nii'
-if path_4D_den_c.exists():
-    logger.info(f'dwidenoise already done : {path_4D_den_c}')
+path_4D_den_cx = denoising_dir / '4D_den_cx.nii'
+if path_4D_den_cx.exists():
+    logger.info(f'dwidenoise already done : {path_4D_den_cx}')
 else:
     cmd = f'dwidenoise \
             -mask {mask_4D} \
             -nthreads {os.cpu_count()} \
-            {path_4D_raw_c} {path_4D_den_c}'
+            {path_4D_raw_cx} {path_4D_den_cx}'
     subprocess.run(cmd, shell=True)
+
+# path_4D_den_ri = denoising_dir / '4D_den_ri.nii'
+# if path_4D_den_ri.exists():
+#     logger.info(f'dwidenoise already done : {path_4D_den_ri}')
+# else:
+#     cmd = f'dwidenoise \
+#             -mask {mask_4D} \
+#             -nthreads {os.cpu_count()} \
+#             {path_4D_raw_ri} {path_4D_den_ri}'
+#     subprocess.run(cmd, shell=True)
 
 
 #%% De-concatenante : use the Magnitude densoing for now
+
+# dir_den_m  = denoising_dir / 'm' ; dir_den_m .mkdir(parents=True, exist_ok=True)
+# dir_den_cx = denoising_dir / 'cx'; dir_den_cx.mkdir(parents=True, exist_ok=True)
+# dir_den_ri = denoising_dir / 'ri'; dir_den_ri.mkdir(parents=True, exist_ok=True)
 
 for idx in range(len(files)):
     if fileorder_4D_m[idx].den_nii.exists():
         logger.info(f'Already exist: {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]')
     else:
+        refimg = nib.load(fileorder_4D_m[idx].raw_nii)
+
         if 'data_den_m' not in locals(): # load data once
             img_den_m = nib.load(path_4D_den_m)
             data_den_m = img_den_m.get_fdata()
+        # if 'data_den_cx' not in locals(): # load data once
+        #     img_den_cx = nib.load(path_4D_den_cx)
+        #     data_den_cx = img_den_cx.get_fdata(dtype=np.complex64)
+        # if 'data_den_ri' not in locals(): # load data once
+        #     img_den_ri = nib.load(path_4D_den_ri)
+        #     data_den_ri = img_den_ri.get_fdata()
+
+        # data_m = data_den_m[:,:,:,idx]
+        # img_den_m = nib.Nifti1Image(dataobj=data_m, affine=refimg.affine, header=refimg.header)
+        # nib.save(img_den_m, dir_den_m / fileorder_4D_m[idx].den_nii.name)
+
+        # data_m = np.abs  (data_den_cx[:,:,:,idx])
+        # data_p = np.angle(data_den_cx[:,:,:,idx])
+        # img_den_m = nib.Nifti1Image(dataobj=data_m, affine=refimg.affine, header=refimg.header)
+        # img_den_p = nib.Nifti1Image(dataobj=data_p, affine=refimg.affine, header=refimg.header)
+        # nib.save(img_den_m, dir_den_cx / fileorder_4D_m[idx].den_nii.name)
+        # nib.save(img_den_p, dir_den_cx / fileorder_4D_p[idx].den_nii.name)
+
+        # data_r = data_den_ri[:,:,:,idx           ]
+        # data_i = data_den_ri[:,:,:,idx+len(files)]
+        # data_c = data_r + 1j*data_i
+        # data_m = np.abs  (data_c)
+        # data_p = np.angle(data_c)
+        # img_den_m = nib.Nifti1Image(dataobj=data_m, affine=refimg.affine, header=refimg.header)
+        # img_den_p = nib.Nifti1Image(dataobj=data_p, affine=refimg.affine, header=refimg.header)
+        # nib.save(img_den_m, dir_den_ri / fileorder_4D_m[idx].den_nii.name)
+        # nib.save(img_den_p, dir_den_ri / fileorder_4D_p[idx].den_nii.name)
+
         data_m = data_den_m[:,:,:,idx]
-        refimg = nib.load(fileorder_4D_m[idx].raw_nii)
         img_den_m = nib.Nifti1Image(dataobj=data_m, affine=refimg.affine, header=refimg.header)
         logger.info(f'Writing MAG {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]'); nib.save(img_den_m, fileorder_4D_m[idx].den_nii); shutil.copyfile(fileorder_4D_m[idx].raw_json,fileorder_4D_m[idx].den_json)
+
 
 
 #%% Root Mean Square of the first echos
@@ -774,26 +822,6 @@ for con in Contrast:
         logger.info(f'Wrote on disk all R2s **single contrast** fits for {con}')
 
 
-#%% De-concatenante : use the complex densoing for QSM
-
-# for idx in range(len(files.mt0)):
-#     mag_qsm = qsm_dir / files.mt0.m[idx].den_nii.name
-#     pha_qsm = qsm_dir / files.mt0.p[idx].den_nii.name
-#     if pha_qsm.exists():
-#         logger.info(f'Already exist: {pha_qsm}')
-#     else:
-#         if 'data_den_c' not in locals(): # load data once
-#             img_den_c = nib.load(path_4D_den_c)
-#             data_den_c = img_den_c.get_fdata(dtype=np.complex64)
-#         data_c = data_den_c[:,:,:,idx]
-#         refimg = nib.load(files.mt0.p[idx].raw_nii)
-#         img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c), affine=refimg.affine, header=refimg.header)
-#         img_den_p = nib.Nifti1Image(dataobj=np.angle(data_c), affine=refimg.affine, header=refimg.header)
-#         logger.info(f'Writing MAG {mag_qsm.stem}[.nii, .json]'); nib.save(img_den_m, mag_qsm); shutil.copyfile(files.mt0.m[idx].raw_json, qsm_dir / files.mt0.m[idx].den_json.name)
-#   
-#       logger.info(f'Writing PHA {pha_qsm.stem}[.nii, .json]'); nib.save(img_den_p, pha_qsm); shutil.copyfile(files.mt0.p[idx].raw_json, qsm_dir / files.mt0.p[idx].den_json.name)
-
-
 #%% Extract 4D magnitude and phase from complex denoising, on the target contrast (mt0)
         
 den_mag4D = qsm_dir / 'den_mag4D.nii'
@@ -801,7 +829,7 @@ den_pha4D = qsm_dir / 'den_pha4D.nii'
 if den_pha4D.exists():
     logger.info(f'Already exist: {den_pha4D}')
 else:
-    img_den_c = nib.load(path_4D_den_c)
+    img_den_c = nib.load(path_4D_den_cx)
     data_den_c = img_den_c.get_fdata(dtype=np.complex64)
     data_c = data_den_c[:,:,:, :len(files.mt0)]
     img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
@@ -809,9 +837,9 @@ else:
     logger.info(f'Writing denoised 4D mag : {den_mag4D}'); nib.save(img_den_m, den_mag4D)
     logger.info(f'Writing denoised 4D pha : {den_pha4D}'); nib.save(img_den_p, den_pha4D)
 
-    diff_data_c = np.diff(data_c, axis=3)
-    img_diff = nib.Nifti1Image(dataobj=np.angle(diff_data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
-    nib.save(img_diff, qsm_dir / 'phase_complex_diff.nii')
+    # diff_data_c = np.diff(data_c, axis=3)
+    # img_diff = nib.Nifti1Image(dataobj=np.angle(diff_data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
+    # nib.save(img_diff, qsm_dir / 'phase_complex_diff.nii')
 
 
 #%% Generate mask for QSM
@@ -834,6 +862,9 @@ if qsm_mask.exists():
     logger.info(f'Already exist: {qsm_mask}')
 else:
     cmd = f'qsmxt mask preset \
+            --op dilate:2 \
+		    --op close:1 \
+		    --op erode:2 \
             --output {qsm_mask} \
             hd-bet {den_mag4D_rms}'
     subprocess.run(cmd, shell=True)
@@ -864,6 +895,16 @@ else:
             --mask {qsm_mask}\
             --output {localfield} \
             {fieldmap}'
+    subprocess.run(cmd, shell=True)
+
+qsm_qc_map = qsm_dir / 'qsm_ilsqr.nii'
+if qsm_qc_map.exists():
+    logger.info(f'Already exist: {qsm_qc_map}')
+else:
+    cmd = f'qsmxt invert ilsqr \
+            --mask {qsm_mask}\
+            --output {qsm_qc_map} \
+            {localfield}'
     subprocess.run(cmd, shell=True)
 
 qsm_map = results_dir / 'qsm.nii'
