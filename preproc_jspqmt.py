@@ -145,9 +145,6 @@ class MPMContainer(dict):
         self.pdw: ContrastMP = ContrastMP()
         self.t1w: ContrastMP = ContrastMP()
 
-        self._count : int = -1
-        self._offset: int =  0
-
     __getattr__ = dict.__getitem__
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
@@ -246,7 +243,7 @@ for con in Contrast:
     for file in files[con].p: fileorder_4D_p.append(file) 
 
 
-#%% Prepare a generous mask for th 4D denoising
+#%% Prepare a generous mask for the 4D denoising
 
 mask_4D = denoising_dir / 'mask_4D.nii'
 if not mask_4D.exists():
@@ -296,13 +293,13 @@ else:
     data_raw_cx = np.concat((data_raw_c.mt0, data_raw_c.mtw, data_raw_c.pdw, data_raw_c.t1w), axis=3)
     data_raw_ri = np.concat((np.real(data_raw_c.mt0), np.real(data_raw_c.mtw), np.real(data_raw_c.pdw), np.real(data_raw_c.t1w),
                              np.imag(data_raw_c.mt0), np.imag(data_raw_c.mtw), np.imag(data_raw_c.pdw), np.imag(data_raw_c.t1w)), axis=3)
-    img_raw_m = nib.Nifti1Image(dataobj=data_raw_m, affine=img_raw.mt0.m[0].affine, header=img_raw.mt0.m[0].header, dtype=np.float32)
+    img_raw_m = nib.Nifti1Image(dataobj=data_raw_m, affine=img_raw[TCON].m[0].affine, header=img_raw[TCON].m[0].header, dtype=np.float32)
     img_raw_m.header['dim'][0] = 4
     logger.info(f'Writing raw Mag 4D images in disk: {path_4D_raw_m}'); nib.save(img_raw_m, path_4D_raw_m)
-    img_raw_cx = nib.Nifti1Image(dataobj=data_raw_cx, affine=img_raw.mt0.m[0].affine, header=img_raw.mt0.m[0].header, dtype=np.complex64)
+    img_raw_cx = nib.Nifti1Image(dataobj=data_raw_cx, affine=img_raw[TCON].m[0].affine, header=img_raw[TCON].m[0].header, dtype=np.complex64)
     img_raw_cx.header['dim'][0] = 4
     logger.info(f'Writing raw Complex 4D images in disk: {path_4D_raw_cx}'); nib.save(img_raw_cx, path_4D_raw_cx)
-    img_raw_ri = nib.Nifti1Image(dataobj=data_raw_ri, affine=img_raw.mt0.m[0].affine, header=img_raw.mt0.m[0].header, dtype=np.float32)
+    img_raw_ri = nib.Nifti1Image(dataobj=data_raw_ri, affine=img_raw[TCON].m[0].affine, header=img_raw[TCON].m[0].header, dtype=np.float32)
     img_raw_ri.header['dim'][0] = 4
     logger.info(f'Writing raw Re Im 4D images in disk: {path_4D_raw_ri}'); nib.save(img_raw_ri, path_4D_raw_ri)
 
@@ -805,7 +802,7 @@ if den_pha4D.exists():
 else:
     img_den_c = nib.load(path_4D_den_cx)
     data_den_c = img_den_c.get_fdata(dtype=np.complex64)
-    data_c = data_den_c[:,:,:, :len(files.mt0)]
+    data_c = data_den_c[:,:,:, :len(files[TCON])]
     img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
     img_den_p = nib.Nifti1Image(dataobj=np.angle(data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
     logger.info(f'Writing denoised 4D mag : {den_mag4D}'); nib.save(img_den_m, den_mag4D)
@@ -852,8 +849,8 @@ fieldmap = qsm_dir / 'fieldmap.nii'
 if fieldmap.exists():
     logger.info(f'Already exist: {fieldmap}')
 else:
-    tes = ' '.join([str(file.echo_time) for file in files.mt0.m])
-    b0 = files.mt0.m[0].info['MagneticFieldStrength']
+    tes = ' '.join([str(file.echo_time) for file in files[TCON].m])
+    b0 = files[TCON].m[0].info['MagneticFieldStrength']
     cmd = f'qsmxt fieldmap laplacian \
             --tes {tes} \
             --b0 {b0} \

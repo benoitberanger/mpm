@@ -1,0 +1,840 @@
+#%% Imports
+
+import nibabel as nib
+import numpy as np
+
+import logging, os, re, json, enum, shutil, subprocess
+from pathlib import Path
+
+
+#%% Config
+
+main_dir = Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM')
+
+target_contrast = 't1w' # other contrast will be registered to this one, and QSM recon done on this one
+
+path_size_pca = 5 # default value 5, while 7 is noisier
+
+work_dir = main_dir / f'classcicmpm_good'
+regex_mtw = re.compile(r'.*MPM_MTw_good$')
+regex_pdw = re.compile(r'.*MPM_PDw_good$')
+regex_t1w = re.compile(r'.*MPM_T1w_good$')
+
+regex_rawnifti  = re.compile(r'^v_.*nii$')
+
+regex_b1map = re.compile(r'.*b1map_3DREAM_relB1$')
+b1map_factor: float = 1/1000
+
+
+#%% Setup
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format=f"%(levelname)8s: %(message)s",
+)
+logger = logging.getLogger()
+logger.info(f'main_dir: {main_dir}')
+
+
+class Contrast(enum.StrEnum):
+    t1w = 't1w'
+    pdw = 'pdw'
+    mtw = 'mtw'
+
+
+class File:
+
+    def __init__(self) -> None:
+        self.is_mag         : bool     = None
+        self.is_b1map       : bool     = False
+        self.contrast       : Contrast = None
+        self.echo_number    : int      = None
+        self.echo_time      : float    = None
+        self.info           : dict     = None
+
+    def __repr__(self)        -> str : return str(self.__dict__)
+    def __lt__  (self, other) -> bool: return self.echo_time < other.echo_time
+    def __bool__(self)        -> bool: return len(self.nii)>0
+    
+    @property
+    def main_dir (self): return self._main_dir
+    @property
+    def root     (self): return self._root
+    @property
+    def raw_nii  (self): return self._raw_nii
+    @property
+    def raw_json (self): return self._raw_json
+    @property
+    def den_nii  (self): return self._den_nii
+    @property
+    def den_json (self): return self._den_json
+    @property
+    def moco_nii (self): return self._moco_nii
+    @property
+    def moco_json(self): return self._moco_json
+    
+    @main_dir.setter
+    def main_dir (self, value): self._main_dir  = Path(value)
+    @root.setter
+    def root     (self, value): self._root      = Path(value)
+    @raw_nii.setter
+    def raw_nii  (self, value): self._raw_nii   = Path(value)
+    @raw_json.setter
+    def raw_json (self, value): self._raw_json  = Path(value)
+    @den_nii.setter
+    def den_nii  (self, value): self._den_nii   = Path(value)
+    @den_json.setter
+    def den_json (self, value): self._den_json  = Path(value)
+    @moco_nii.setter
+    def moco_nii (self, value): self._moco_nii  = Path(value)
+    @moco_json.setter
+    def moco_json(self, value): self._moco_json = Path(value)
+
+
+class ContrastMP:
+    def __init__(self):
+        self.m: list = []
+        self.p: list = []
+
+    def __len__(self):
+        return len(self.m)
+
+
+class MPMContainer(dict):
+    def __init__(self):
+        self.mtw: ContrastMP = ContrastMP()
+        self.pdw: ContrastMP = ContrastMP()
+        self.t1w: ContrastMP = ContrastMP()
+
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+
+    def __len__(self):
+        return len(self.mtw) + len(self.pdw) + len(self.t1w)
+
+
+#%% Prepare dirs
+
+work_dir.mkdir(parents=True, exist_ok=True)
+logger.info(f'work_dir is : {work_dir}')
+
+denoising_dir = work_dir / '01_Denoising'
+masking_dir   = work_dir / '02_Masking'
+moco_dir      = work_dir / '03_MotionCorrection'
+b1map_dir     = work_dir / '04_B1map'
+r2s_dir       = work_dir / '05_R2s'
+qsm_dir       = work_dir / '06_QSM'
+denoising_dir.mkdir(parents=True, exist_ok=True)
+masking_dir  .mkdir(parents=True, exist_ok=True)
+moco_dir     .mkdir(parents=True, exist_ok=True)
+b1map_dir    .mkdir(parents=True, exist_ok=True)
+r2s_dir      .mkdir(parents=True, exist_ok=True)
+qsm_dir      .mkdir(parents=True, exist_ok=True)
+
+results_dir = work_dir / 'Results'
+results_dir.mkdir(parents=True, exist_ok=True)
+
+
+#%% Fetch contrast dirs files
+
+raw_sources: list[File] = []
+
+for root, dirs, files in os.walk(main_dir):
+    for file in files:
+        if regex_rawnifti.match(file):
+            new = File()
+            new.main_dir = main_dir
+            new.root     = root
+            new.raw_nii  = new.root / file
+            jsonfile     = new.raw_nii.with_suffix('.json')
+            if jsonfile.is_file():
+                new.raw_json = jsonfile
+                with open(jsonfile,'r') as fid:
+                    new.info = json.load(fid)
+            if regex_mtw.match(root) or regex_pdw.match(root) or regex_t1w.match(root):
+                if   new.info['ImageType'][2] == 'M': new.is_mag = True;  mp = 'm'
+                elif new.info['ImageType'][2] == 'P': new.is_mag = False; mp = 'p' 
+                new.echo_number = new.info['EchoNumber']
+                new.echo_time   = new.info['EchoTime']
+                if regex_mtw.match(root): new.contrast = Contrast.mtw
+                if regex_pdw.match(root): new.contrast = Contrast.pdw
+                if regex_t1w.match(root): new.contrast = Contrast.t1w
+                new.den_nii = denoising_dir /  f'den_{new.contrast}_e{new.echo_number:02d}_{mp}.nii'
+                new.den_json = new.den_nii.with_suffix('.json')
+                new.moco_nii = moco_dir / f'moco_{new.den_nii.name}'
+                new.moco_json = new.moco_nii.with_suffix('.json')
+                raw_sources.append(new)
+            if regex_b1map.match(root):
+                new.is_b1map = True
+                raw_sources.append(new)
+
+raw_mag = list(filter(lambda x: x.is_mag==True , raw_sources))
+raw_pha = list(filter(lambda x: x.is_mag==False, raw_sources))
+files = MPMContainer()
+for con in Contrast:
+    files[con].m = list(filter(lambda x: x.contrast==con, raw_mag))
+    files[con].p = list(filter(lambda x: x.contrast==con, raw_pha))
+    files[con].m = sorted(files[con].m)
+    files[con].p = sorted(files[con].p)
+    if len(files[con].m) < 1: raise FileNotFoundError(f'{con} // magnitude not found with {main_dir / regex_t1w.pattern / regex_rawnifti.pattern}')
+    if len(files[con].p) < 1: raise FileNotFoundError(f'{con} // phase     not found with {main_dir / regex_t1w.pattern / regex_rawnifti.pattern}')
+    logger.info(f'{con} // found {len(files[con].m)} magnitudes')
+    logger.info(f'{con} // found {len(files[con].p)} phases')
+    logger.info(f'{con} // sorted TE = {[round(file.echo_time*1000,3) for file in files[con].m]}(ms)')
+
+raw_b1map: list[File] = list(filter(lambda x: x.is_b1map==True, raw_sources))
+if len(raw_b1map) < 1: raise FileNotFoundError(f'no raw_b1map found with {main_dir / regex_b1map.pattern / regex_rawnifti.pattern}')
+if len(raw_b1map) > 1: raise FileNotFoundError(f'too many raw_b1map found with {main_dir / regex_b1map.pattern / regex_rawnifti.pattern}')
+raw_b1map: File = raw_b1map[0]
+
+
+#%% Set target_contrast
+
+TCON = target_contrast # just an alias
+
+
+#%% Prepare some containers and shortcuts
+
+fileorder_4D_m:list[File] = []
+fileorder_4D_p:list[File] = []
+for con in Contrast:
+    for file in files[con].m: fileorder_4D_m.append(file)
+    for file in files[con].p: fileorder_4D_p.append(file) 
+
+
+#%% Prepare a generous mask for the 4D denoising
+
+mask_4D = denoising_dir / 'mask_4D.nii'
+if not mask_4D.exists():
+    con_masks: list[str] = []
+    for con in Contrast:
+        input = files[con].m[0].raw_nii
+        mask  = denoising_dir / f'mask_{con}.nii'
+        if mask.exists():
+            logger.info(f'Already exist: {mask}')
+        else:
+            subprocess.run(f'mri_synthstrip --image {input} --mask {mask} --border 2', shell=True)
+        con_masks.append(str(mask))
+    str_con_mask = ' '.join(con_masks)
+    cmd = f'qsmxt mask or \
+        --op dilate:2 \
+        --op close:1 \
+        --op fill-holes:1 \
+        --op erode:2 \
+        --output {mask_4D} \
+        {str_con_mask}'
+    subprocess.run(cmd, shell=True)
+
+
+#%% Concatenate all raw images mag:tMPPCA & complex:dwidenoise
+
+path_4D_raw_m  = denoising_dir / '4D_raw_m.nii'
+path_4D_raw_cx = denoising_dir / '4D_raw_cx.nii'
+path_4D_raw_ri = denoising_dir / '4D_raw_ri.nii'
+if path_4D_raw_cx.exists():
+    logger.info(f'Already done raw 4D : {path_4D_raw_cx}')    
+else:
+    logger.info(f'Stacking raw images into single 4D')
+    
+    img_raw    = MPMContainer()
+    data_raw   = MPMContainer()
+    data_raw_c = MPMContainer()
+
+    for con in Contrast:
+        logger.info(f'Loading header files[{con}].m');  img_raw[con].m = [nib.load(file.root / file.raw_nii) for file in   files[con].m]
+        logger.info(f'Loading header files[{con}].p');  img_raw[con].p = [nib.load(file.root / file.raw_nii) for file in   files[con].p]
+        logger.info(f'Loading data   files[{con}].m'); data_raw[con].m = np.stack([img.get_fdata()           for img  in img_raw[con].m], axis=3)
+        logger.info(f'Loading data   files[{con}].p'); data_raw[con].p = np.stack([img.get_fdata()           for img  in img_raw[con].p], axis=3)
+        data_raw[con].p *= np.pi / 4096 # rescale Siemens phase [-4096 4095] to radian
+        data_raw_c[con] = data_raw[con].m * np.exp(1j * data_raw[con].p)
+
+    data_raw_m  = np.concat((data_raw  .t1w.m, data_raw  .pdw.m, data_raw  .mtw.m), axis=3)
+    data_raw_cx = np.concat((data_raw_c.t1w  , data_raw_c.pdw  , data_raw_c.mtw  ), axis=3)
+    data_raw_ri = np.concat((np.real(data_raw_c.t1w), np.real(data_raw_c.pdw), np.real(data_raw_c.mtw),
+                             np.imag(data_raw_c.t1w), np.imag(data_raw_c.pdw), np.imag(data_raw_c.mtw)), axis=3)
+    img_raw_m = nib.Nifti1Image(dataobj=data_raw_m, affine=img_raw[TCON].m[0].affine, header=img_raw[TCON].m[0].header, dtype=np.float32)
+    img_raw_m.header['dim'][0] = 4
+    logger.info(f'Writing raw Mag 4D images in disk: {path_4D_raw_m}'); nib.save(img_raw_m, path_4D_raw_m)
+    img_raw_cx = nib.Nifti1Image(dataobj=data_raw_cx, affine=img_raw[TCON].m[0].affine, header=img_raw[TCON].m[0].header, dtype=np.complex64)
+    img_raw_cx.header['dim'][0] = 4
+    logger.info(f'Writing raw Complex 4D images in disk: {path_4D_raw_cx}'); nib.save(img_raw_cx, path_4D_raw_cx)
+    img_raw_ri = nib.Nifti1Image(dataobj=data_raw_ri, affine=img_raw[TCON].m[0].affine, header=img_raw[TCON].m[0].header, dtype=np.float32)
+    img_raw_ri.header['dim'][0] = 4
+    logger.info(f'Writing raw Re Im 4D images in disk: {path_4D_raw_ri}'); nib.save(img_raw_ri, path_4D_raw_ri)
+
+
+#%% Run tMPPCA
+
+path_4D_den_m = denoising_dir / '4D_den_m.nii'
+if path_4D_den_m.exists():
+    logger.info(f'tMPPCA already done : {path_4D_den_m}')
+else:
+    cmd = f'denoise-tmppca \
+            --mask {mask_4D} \
+            --num_threads {os.cpu_count()} \
+            --window {path_size_pca},{path_size_pca},{path_size_pca} \
+            {path_4D_raw_m} \
+            {path_4D_den_m} '
+    subprocess.run(cmd, shell=True)
+
+
+#%% Run dwidenoise
+
+path_4D_den_cx = denoising_dir / '4D_den_cx.nii'
+if path_4D_den_cx.exists():
+    logger.info(f'dwidenoise already done : {path_4D_den_cx}')
+else:
+    cmd = f'dwidenoise \
+            -mask {mask_4D} \
+            -nthreads {os.cpu_count()} \
+            {path_4D_raw_cx} {path_4D_den_cx}'
+    subprocess.run(cmd, shell=True)
+
+# path_4D_den_ri = denoising_dir / '4D_den_ri.nii'
+# if path_4D_den_ri.exists():
+#     logger.info(f'dwidenoise already done : {path_4D_den_ri}')
+# else:
+#     cmd = f'dwidenoise \
+#             -mask {mask_4D} \
+#             -nthreads {os.cpu_count()} \
+#             {path_4D_raw_ri} {path_4D_den_ri}'
+#     subprocess.run(cmd, shell=True)
+
+
+#%% De-concatenante : use the Magnitude densoing for now
+
+# dir_den_m  = denoising_dir / 'm' ; dir_den_m .mkdir(parents=True, exist_ok=True)
+# dir_den_cx = denoising_dir / 'cx'; dir_den_cx.mkdir(parents=True, exist_ok=True)
+# dir_den_ri = denoising_dir / 'ri'; dir_den_ri.mkdir(parents=True, exist_ok=True)
+
+for idx in range(len(files)):
+    if fileorder_4D_m[idx].den_nii.exists():
+        logger.info(f'Already exist: {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]')
+    else:
+        refimg = nib.load(fileorder_4D_m[idx].raw_nii)
+
+        if 'data_den_m' not in locals(): # load data once
+            img_den_m = nib.load(path_4D_den_m)
+            data_den_m = img_den_m.get_fdata()
+        # if 'data_den_cx' not in locals(): # load data once
+        #     img_den_cx = nib.load(path_4D_den_cx)
+        #     data_den_cx = img_den_cx.get_fdata(dtype=np.complex64)
+        # if 'data_den_ri' not in locals(): # load data once
+        #     img_den_ri = nib.load(path_4D_den_ri)
+        #     data_den_ri = img_den_ri.get_fdata()
+
+        # data_m = data_den_m[:,:,:,idx]
+        # img_den_m = nib.Nifti1Image(dataobj=data_m, affine=refimg.affine, header=refimg.header)
+        # nib.save(img_den_m, dir_den_m / fileorder_4D_m[idx].den_nii.name)
+
+        # data_m = np.abs  (data_den_cx[:,:,:,idx])
+        # data_p = np.angle(data_den_cx[:,:,:,idx])
+        # img_den_m = nib.Nifti1Image(dataobj=data_m, affine=refimg.affine, header=refimg.header)
+        # img_den_p = nib.Nifti1Image(dataobj=data_p, affine=refimg.affine, header=refimg.header)
+        # nib.save(img_den_m, dir_den_cx / fileorder_4D_m[idx].den_nii.name)
+        # nib.save(img_den_p, dir_den_cx / fileorder_4D_p[idx].den_nii.name)
+
+        # data_r = data_den_ri[:,:,:,idx           ]
+        # data_i = data_den_ri[:,:,:,idx+len(files)]
+        # data_c = data_r + 1j*data_i
+        # data_m = np.abs  (data_c)
+        # data_p = np.angle(data_c)
+        # img_den_m = nib.Nifti1Image(dataobj=data_m, affine=refimg.affine, header=refimg.header)
+        # img_den_p = nib.Nifti1Image(dataobj=data_p, affine=refimg.affine, header=refimg.header)
+        # nib.save(img_den_m, dir_den_ri / fileorder_4D_m[idx].den_nii.name)
+        # nib.save(img_den_p, dir_den_ri / fileorder_4D_p[idx].den_nii.name)
+
+        data_m = data_den_m[:,:,:,idx]
+        img_den_m = nib.Nifti1Image(dataobj=data_m, affine=refimg.affine, header=refimg.header)
+        logger.info(f'Writing MAG {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]'); nib.save(img_den_m, fileorder_4D_m[idx].den_nii); shutil.copyfile(fileorder_4D_m[idx].raw_json,fileorder_4D_m[idx].den_json)
+
+
+#%% Masking
+
+for con in Contrast:
+    den_con_e01 = files[con].m[0].den_nii
+    mask_raw    = masking_dir / f'mask_{den_con_e01.stem}_raw.nii'
+    if mask_raw.exists():
+        logger.info(f'Already exist: {mask_raw}')
+    else:
+        subprocess.run(f'mri_synthstrip --image {den_con_e01} --mask {mask_raw} --border 2', shell=True)
+    mask_clean  = mask_raw.with_name(mask_raw.name.replace('_raw.nii','_clean.nii'))
+    if mask_clean.exists():
+        logger.info(f'Already exist: {mask_clean}')
+    else:
+        cmd = f'qsmxt mask dilate \
+        --iterations 2 \
+        --op close:1 \
+        --op fill-holes:1 \
+        --op erode:2 \
+        --output {mask_clean} \
+        {mask_raw}'
+        subprocess.run(cmd, shell=True)
+
+
+#%% Prepare result mask
+
+target_img = files[con].m[0].den_nii
+target_msk = masking_dir / f'mask_{target_img.stem}_clean.nii'
+
+result_mask = results_dir / 'mask.nii'
+if not result_mask.exists():
+    result_mask.symlink_to(target_msk)
+
+
+#%% Motion correction
+
+
+for con in Contrast:
+    if con == TCON:
+        for file in files[TCON].m:
+            if not file.moco_nii.exists():
+                file.moco_nii .symlink_to(file.den_nii )
+                file.moco_json.symlink_to(file.den_json)
+        continue
+    
+    moving_img = files[con].m[0].den_nii
+    moving_msk = masking_dir / f'mask_{moving_img.stem}_clean.nii'
+
+    mat = moco_dir / f'ants_{con}_0GenericAffine.mat'
+    if not mat.exists():
+        logger.info(f'antsRegistration {con} -> mt0 : {moving_img}')
+
+        cmd = f'antsRegistration \
+                --dimensionality 3 \
+                --initial-moving-transform [{target_msk},{moving_msk},1] \
+                --winsorize-image-intensities [0.005,0.995] \
+                --use-histogram-matching 0 \
+                --masks [{target_msk}, {moving_msk}] \
+                --output {moco_dir}/ants_{con}_ \
+                --collapse-output-transforms 1 \
+                --interpolation LanczosWindowedSinc \
+                --transform Rigid[0.1] \
+                --metric MI[{target_img},{moving_img},1,32,Regular,0.25] \
+                --convergence [500x200,1e-6,10] \
+                --shrink-factors   2x1 \
+                --smoothing-sigmas 1x0vox'
+
+        subprocess.run(cmd, shell=True)
+
+    n_echo = len(files[con])
+    for echo in range(1,n_echo+1):
+        file_in  = denoising_dir /      f'den_{con}_e{echo:02d}_m.nii'
+        file_out = moco_dir      / f'moco_den_{con}_e{echo:02d}_m.nii'
+        if not file_out.exists():
+            logger.info(f'antsApplyTransforms {con} -> mt0 : {file_out}')
+            cmd = f'antsApplyTransforms \
+                    --dimensionality 3 \
+                    --interpolation LanczosWindowedSinc \
+                    --input {file_in}\
+                    --reference-image {file_in} \
+                    --transform {mat} \
+                    --output {file_out}'
+            subprocess.run(cmd, shell=True)
+                
+
+#%% B1map
+
+raw_b1map_workdir = b1map_dir / 'b1map_0_raw.nii'
+b1map_resliced    = b1map_dir / 'b1map_1_resliced.nii'
+b1map_scaled      = b1map_dir / 'b1map_2_scaled.nii'
+b1map_smoothed    = b1map_dir / 'b1map_3_smoothed.nii'
+if b1map_smoothed.exists():
+    logger.info(f'B1map ready: {b1map_smoothed}')
+else:
+    logger.info(f'Preparing B1map : reslice, scale, smooth')
+    shutil.copyfile(raw_b1map.raw_nii,raw_b1map_workdir)
+    cmd = f'antsApplyTransforms \
+            --dimensionality 3 \
+            --interpolation LanczosWindowedSinc \
+            --input {raw_b1map_workdir}\
+            --reference-image {target_img} \
+            --output {b1map_resliced}'
+    subprocess.run(cmd, shell=True)
+    subprocess.run(f'ImageMath 3 {b1map_scaled} m {b1map_resliced} {b1map_factor}', shell=True)
+    subprocess.run(f'SmoothImage 3 {b1map_scaled} 8 {b1map_smoothed}', shell=True)
+
+
+#%% Fit
+
+# mt0 = moco_dir    / 'moco_den_mt0_e01_m.nii'
+# mtw = moco_dir    / 'moco_den_mtw_e01_m.nii'
+# pdw = moco_dir    / 'moco_den_pdw_e01_m.nii'
+# t1w = moco_dir    / 'moco_den_t1w_e01_m.nii'
+# mpf = results_dir / 'mpf.nii'
+# t1f = results_dir / 't1f.nii'
+# r1f = results_dir / 'r1f.nii'
+
+# if t1f.exists():
+#     logger.info(f'fit-JSPqMT done: {t1f}')
+# else:
+#     d = JSPqMT['MTw_TIMINGS'] # shortcut
+#     MTW_TIMINGS: str  = f"{d['SatPulseDuration']},{d['Interdelay']},{d['ReadoutPulseDuration']},{d['TR']}"
+#     d = JSPqMT['VFA_TIMINGS'] # shortcut
+#     VFA_TIMINGS: str  = f"{d['ReadoutPulseDuration']},{d['TR']}"
+#     d = JSPqMT['MTw_PARX'] # shortcut
+#     MTW_PARX: str  = f"{d['ReadoutFA']},{d['ReadoutPulseShape']},{d['SaturationFA']},{d['SaturationOffset']},{d['SaturationPulseShape']}"
+#     d = JSPqMT['VFA_PARX'] # shortcut
+#     VFA_PARX: str  = f"{','.join(map(str,d['ReadoutFA']))},{d['ReadoutPulseShape']}"
+
+#     cmd = f'fit-JSPqMT {mt0},{mtw} {pdw},{t1w} {mpf} {t1f} \
+#             --R1f {r1f} \
+#             --mask {target_msk} \
+#             --B1 {b1map_smoothed} \
+#             --MTw_TIMINGS {MTW_TIMINGS} \
+#             --VFA_TIMINGS {VFA_TIMINGS} \
+#             --MTw_PARX {MTW_PARX} \
+#             --VFA_PARX {VFA_PARX} \
+#             --use_GBM \
+#             --nworkers {os.cpu_count()} \
+#             --cpp_opt'
+#     subprocess.run(cmd, shell=True)
+
+
+#%% fit R2* // functions
+
+def fit_t2s_loglin_leastsquare(data: np.ndarray,
+                               TE  : np.ndarray,
+                               mask: np.ndarray,
+                               method: str
+                               ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
+    
+    nx,ny,nz,ne = data.shape
+    nvox = nx*ny*nz
+    
+    data = np.permute_dims(data, (3,0,1,2)) # echos on the first dimension, easier reshape
+
+    data_2d = np.reshape(data, (ne,nvox))
+    mask_flat = np.reshape(mask, (nvox))
+    
+    mask_flat = mask_flat > 0.1
+    data_masked = data_2d[:,mask_flat]
+
+    # AX=B : here, X is [log(S0) -R2s]
+    with np.errstate(divide='ignore',invalid='ignore'): b = np.log(data_masked) # [ne, nvox]
+    b[~np.isfinite(b)] = 0
+    a = np.vstack( (np.ones(ne), TE) ).T # [ne, 2]
+
+    if method == 'ols':
+        beta, err_flat, _, _ = np.linalg.lstsq(a, b)
+    elif method == 'wls':
+        # weighted least square : use 1/TE as weight, as later echos have less SNR
+        w = np.diag(np.sqrt(1/TE))
+        wa = np.dot(w,a)
+        wb = np.dot(w,b) 
+        beta, err_flat, _, _ = np.linalg.lstsq(wa, wb)
+    else:
+        raise RuntimeError(f'bad t2s fit method: {method}')
+
+    s0_flat = np.exp(beta[0,:])
+
+    r2s_flat = -beta[1,:]
+    with np.errstate(divide='ignore',invalid='ignore'): t2s_flat = 1/r2s_flat
+    r2s_flat[r2s_flat<0] = 0
+    t2s_flat[t2s_flat>1] = 0
+    t2s_flat[t2s_flat<0] = 0
+
+    s0  = np.zeros(nvox, dtype=np.float32)
+    r2s = np.zeros(nvox, dtype=np.float32)
+    t2s = np.zeros(nvox, dtype=np.float32)
+    err = np.zeros(nvox, dtype=np.float32)
+    s0 [mask_flat] = s0_flat
+    r2s[mask_flat] = r2s_flat
+    t2s[mask_flat] = t2s_flat
+    err[mask_flat] = err_flat
+    s0  =  s0.reshape(nx,ny,nz)
+    r2s = r2s.reshape(nx,ny,nz)
+    t2s = t2s.reshape(nx,ny,nz)
+    err = err.reshape(nx,ny,nz)
+
+    return s0, t2s, r2s, err
+
+
+def fit_t2s_estatics(data_mtw: np.ndarray, data_pdw: np.ndarray, data_t1w: np.ndarray,
+                       TE_mtw: np.ndarray,   TE_pdw: np.ndarray,   TE_t1w: np.ndarray,
+                     mask: np.ndarray,
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] :
+
+    N_CONTRAST = 3
+
+    nx,ny,nz = data_t1w.shape[:3]
+    nvox = nx*ny*nz
+    
+    mask_flat = np.reshape(mask, (nvox))
+    mask_flat = mask_flat > 0.1
+
+    data_mtw = np.permute_dims(data_mtw, (3,0,1,2))
+    data_pdw = np.permute_dims(data_pdw, (3,0,1,2))
+    data_t1w = np.permute_dims(data_t1w, (3,0,1,2))
+
+    ne_mtw = len(TE_mtw)
+    ne_pdw = len(TE_pdw)
+    ne_t1w = len(TE_t1w)
+
+    data_2d_mtw = np.reshape(data_mtw, (ne_mtw,nvox))
+    data_2d_pdw = np.reshape(data_pdw, (ne_pdw,nvox))
+    data_2d_t1w = np.reshape(data_t1w, (ne_t1w,nvox))
+    
+    data_masked_mtw = data_2d_mtw[:,mask_flat]
+    data_masked_pdw = data_2d_pdw[:,mask_flat]
+    data_masked_t1w = data_2d_t1w[:,mask_flat]
+
+    a_mtw = np.zeros((ne_mtw, 1+N_CONTRAST))
+    a_pdw = np.zeros((ne_pdw, 1+N_CONTRAST))
+    a_t1w = np.zeros((ne_t1w, 1+N_CONTRAST))
+
+    a_mtw[:,0] = 1
+    a_pdw[:,1] = 1
+    a_t1w[:,2] = 1
+
+    a_mtw[:,-1] = TE_mtw
+    a_pdw[:,-1] = TE_pdw
+    a_t1w[:,-1] = TE_t1w
+
+    a = np.vstack((          a_mtw,           a_pdw,           a_t1w))
+    b = np.vstack((data_masked_mtw, data_masked_pdw, data_masked_t1w))
+    with np.errstate(divide='ignore',invalid='ignore'): b = np.log(b)
+    b[~np.isfinite(b)] = 0
+
+    beta, err_flat, _, _ = np.linalg.lstsq( a, b )
+
+    s0_flat_mtw = np.exp(beta[0,:])
+    s0_flat_pdw = np.exp(beta[1,:])
+    s0_flat_t1w = np.exp(beta[2,:])
+
+    r2s_flat = -beta[-1,:]
+    t2s_flat = 1/r2s_flat
+    r2s_flat[r2s_flat<0] = 0
+    t2s_flat[t2s_flat>1] = 0
+    t2s_flat[t2s_flat<0] = 0
+
+    s0_mtw  = np.zeros(nvox, dtype=np.float32)
+    s0_pdw  = np.zeros(nvox, dtype=np.float32)
+    s0_t1w  = np.zeros(nvox, dtype=np.float32)
+    r2s     = np.zeros(nvox, dtype=np.float32)
+    t2s     = np.zeros(nvox, dtype=np.float32)
+    err     = np.zeros(nvox, dtype=np.float32)
+    s0_mtw[mask_flat] = s0_flat_mtw
+    s0_pdw[mask_flat] = s0_flat_pdw
+    s0_t1w[mask_flat] = s0_flat_t1w
+    r2s   [mask_flat] = r2s_flat
+    t2s   [mask_flat] = t2s_flat
+    err   [mask_flat] = err_flat
+    s0_mtw  = s0_mtw.reshape(nx,ny,nz)
+    s0_pdw  = s0_pdw.reshape(nx,ny,nz)
+    s0_t1w  = s0_t1w.reshape(nx,ny,nz)
+    r2s     = r2s   .reshape(nx,ny,nz)
+    t2s     = t2s   .reshape(nx,ny,nz)
+    err     = err   .reshape(nx,ny,nz)
+
+    return s0_mtw, s0_pdw, s0_t1w, t2s, r2s, err
+
+
+def fit_t2s_arlo(data: np.ndarray,
+                 TE  : np.ndarray,
+                 mask: np.ndarray,
+                 ) -> tuple[np.ndarray, np.ndarray] :
+    
+    nx,ny,nz,ne = data.shape
+    dTE = np.diff(TE).mean()
+
+    # in the paper, J=2, it means take echos #0 #1 #2, so a triplet
+    nt = ne - 2 # numer of triplets
+    Si = np.zeros((nx,ny,nz,nt), dtype=np.float32)
+    Di = np.zeros((nx,ny,nz,nt), dtype=np.float32)
+
+    for t in range(nt):
+        Si[:,:,:,t] = (data[:,:,:,t] + 4*data[:,:,:,t+1] + data[:,:,:,t+2]) * dTE/3
+        Di[:,:,:,t] =  data[:,:,:,t]                     - data[:,:,:,t+2]
+
+    with np.errstate(divide='ignore',invalid='ignore'): 
+        t2s = (        np.sum(Si*Si,axis=-1) + dTE/3 * np.sum(Si*Di,axis=-1)) \
+            / (dTE/3 * np.sum(Si*Si,axis=-1) +         np.sum(Si*Di,axis=-1))
+        
+    t2s *= mask
+    with np.errstate(divide='ignore',invalid='ignore'): r2s = 1/t2s
+    t2s[t2s<0]    = 0
+    t2s[t2s>1]    = 0
+    r2s[r2s<0]    = 0
+    r2s[r2s>1000] = 0
+    return t2s, r2s
+
+
+#%% fit R2* // ESTATICS
+
+r2s_estatics = results_dir / f'r2s_estatics.nii'
+if r2s_estatics.exists():
+    logger.info(f'Already exist: {r2s_estatics}')
+else:
+    logger.info(f'R2s fit with ESTATICS method (multi contrast)')
+    mask = nib.load(target_msk).get_fdata()
+
+    imgs = MPMContainer()
+    data = MPMContainer()
+    te   = MPMContainer()
+    for con in Contrast:
+        imgs[con].m = [nib.load(file.root / file.moco_nii) for file in files[con].m]
+        data[con].m = np.stack([img.get_fdata() for img in imgs[con].m], axis=3)
+        te  [con].m = np.array([file.echo_time for file in files[con].m])
+    affine = imgs[TCON].m[0].affine
+    header = imgs[TCON].m[0].header
+
+    s0_mtw, s0_pdw, s0_t1w, t2s, r2s, err = fit_t2s_estatics(
+        data_mtw=data.mtw.m, data_pdw=data.pdw.m, data_t1w=data.t1w.m,
+          TE_mtw=  te.mtw.m,   TE_pdw=  te.pdw.m,   TE_t1w=  te.t1w.m,
+        mask=mask
+        )
+    
+    nib.save(nib.Nifti1Image(dataobj=r2s   , affine=affine, header=header, dtype=np.float32), results_dir / f'r2s_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=t2s   , affine=affine, header=header, dtype=np.float32), results_dir / f't2s_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_mtw, affine=affine, header=header, dtype=np.float32), r2s_dir     / f's0_mtw_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_pdw, affine=affine, header=header, dtype=np.float32), r2s_dir     / f's0_pdw_estatics.nii')
+    nib.save(nib.Nifti1Image(dataobj=s0_t1w, affine=affine, header=header, dtype=np.float32), r2s_dir     / f's0_t1w_estatics.nii')
+
+    logger.info(f'Wrote: {r2s_estatics}')
+
+
+#%% fit R2* // OLS + WLS + NumART + ARLO on all contrasts, just to compare
+
+for con in Contrast:
+
+    r2s_ols = r2s_dir / f'r2s_{con}_ols.nii'
+    if r2s_ols.exists():
+        logger.info(f'Already exist: {r2s_ols}')
+    else:
+        logger.info(f'R2s **single contrast** fits for {con}')
+        mask = nib.load(target_msk).get_fdata()
+
+        imgs = [nib.load(file.root / file.moco_nii) for file in files[con].m]
+        data = np.stack([img.get_fdata() for img in imgs], axis=3)
+        te   = np.array([file.echo_time for file in files[con].m])
+        affine = imgs[0].affine
+        header = imgs[0].header
+
+        s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data, te, mask, 'ols')
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f'r2s_{con}_ols.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f't2s_{con}_ols.nii')
+        nib.save(nib.Nifti1Image(dataobj=s0 , affine=affine, header=header, dtype=np.float32), r2s_dir /  f's0_{con}_ols.nii')
+
+        s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data, te, mask, 'wls')
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f'r2s_{con}_wls.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f't2s_{con}_wls.nii')
+        nib.save(nib.Nifti1Image(dataobj=s0 , affine=affine, header=header, dtype=np.float32), r2s_dir /  f's0_{con}_wls.nii')
+
+        with np.errstate(divide='ignore',invalid='ignore'): 
+            t2s = (te[-1]-te[0]) / (2*(len(te)-1)) \
+            * ( (data[:,:,:,0] + data[:,:,:,-1]) + 2 * np.sum(data[:,:,:,1:-1], axis=3) ) \
+            /   (data[:,:,:,0] - data[:,:,:,-1])
+            t2s *= mask
+            r2s = 1/t2s
+        t2s[t2s<0]    = 0
+        t2s[t2s>1]    = 0
+        r2s[r2s<0]    = 0
+        r2s[r2s>1000] = 0
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f'r2s_{con}_numart.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f't2s_{con}_numart.nii')
+
+        t2s, r2s = fit_t2s_arlo(data, te, mask)
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f'r2s_{con}_arlo.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f't2s_{con}_arlo.nii')
+        logger.info(f'Wrote on disk all R2s **single contrast** fits for {con}')
+
+
+#%% Extract 4D magnitude and phase from complex denoising, on the target contrast (mt0)
+        
+den_mag4D = qsm_dir / 'den_mag4D.nii'
+den_pha4D = qsm_dir / 'den_pha4D.nii'
+if den_pha4D.exists():
+    logger.info(f'Already exist: {den_pha4D}')
+else:
+    img_den_c = nib.load(path_4D_den_cx)
+    data_den_c = img_den_c.get_fdata(dtype=np.complex64)
+    data_c = data_den_c[:,:,:, :len(files[TCON])]
+    img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
+    img_den_p = nib.Nifti1Image(dataobj=np.angle(data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
+    logger.info(f'Writing denoised 4D mag : {den_mag4D}'); nib.save(img_den_m, den_mag4D)
+    logger.info(f'Writing denoised 4D pha : {den_pha4D}'); nib.save(img_den_p, den_pha4D)
+
+    # diff_data_c = np.diff(data_c, axis=3)
+    # img_diff = nib.Nifti1Image(dataobj=np.angle(diff_data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
+    # nib.save(img_diff, qsm_dir / 'phase_complex_diff.nii')
+
+
+#%% Generate mask for QSM
+    
+den_mag4D_rms = qsm_dir / 'den_mag4D_rms.nii'
+if den_mag4D_rms.exists():
+    logger.info(f'Already exist: {den_mag4D_rms}')
+else:
+    img_den_mag4D = nib.load(den_mag4D)
+    data_den_mag4D = img_den_mag4D.get_fdata()
+    data_den_rms = np.sqrt(np.mean(np.square(data_den_mag4D),axis=3))
+    img_den_rms = nib.Nifti1Image(dataobj=data_den_rms, affine=img_den_mag4D.affine, header=img_den_mag4D.header)
+    img_den_rms.header['dim'][0] = 3
+    logger.info(f'Writing RMS mag : {den_mag4D_rms}')
+    nib.save(img_den_rms, den_mag4D_rms)
+
+
+qsm_mask = qsm_dir / 'mask.nii'
+resulat_qsm_mask = results_dir / 'qsm_mask.nii'
+if qsm_mask.exists():
+    logger.info(f'Already exist: {qsm_mask}')
+else:
+    cmd = f'qsmxt mask preset \
+            --op dilate:2 \
+		    --op close:1 \
+		    --op erode:2 \
+            --output {qsm_mask} \
+            hd-bet {den_mag4D_rms}'
+    subprocess.run(cmd, shell=True)
+    resulat_qsm_mask.symlink_to(qsm_mask)
+
+
+#%% QSM
+
+fieldmap = qsm_dir / 'fieldmap.nii'
+if fieldmap.exists():
+    logger.info(f'Already exist: {fieldmap}')
+else:
+    tes = ' '.join([str(file.echo_time) for file in files[TCON].m])
+    b0 = files[TCON].m[0].info['MagneticFieldStrength']
+    cmd = f'qsmxt fieldmap laplacian \
+            --tes {tes} \
+            --b0 {b0} \
+            --mask {qsm_mask}\
+            --magnitude {den_mag4D} \
+            --output {fieldmap} \
+            {den_pha4D}'
+    subprocess.run(cmd, shell=True)
+
+localfield = qsm_dir / 'localfield.nii'
+if localfield.exists():
+    logger.info(f'Already exist: {localfield}')
+else:
+    cmd = f'qsmxt bgremove vsharp \
+            --mask {qsm_mask}\
+            --output {localfield} \
+            {fieldmap}'
+    subprocess.run(cmd, shell=True)
+
+qsm_qc_map = qsm_dir / 'qsm_ilsqr.nii'
+if qsm_qc_map.exists():
+    logger.info(f'Already exist: {qsm_qc_map}')
+else:
+    cmd = f'qsmxt invert ilsqr \
+            --mask {qsm_mask}\
+            --output {qsm_qc_map} \
+            {localfield}'
+    subprocess.run(cmd, shell=True)
+
+qsm_map = results_dir / 'qsm_lpcnn.nii'
+if qsm_map.exists():
+    logger.info(f'Already exist: {qsm_map}')
+else:
+    cmd = f'qsmxt invert lpcnn \
+            --mask {qsm_mask}\
+            --output {qsm_map} \
+            {localfield}'
+    subprocess.run(cmd, shell=True)
+
