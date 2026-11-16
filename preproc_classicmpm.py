@@ -492,6 +492,32 @@ else:
 #     subprocess.run(cmd, shell=True)
 
 
+t1map = results_dir / 't1map.nii'
+r1map = results_dir / 'r1map.nii'
+if not t1map.exists():
+    s0map = results_dir / 's0map.nii'
+    TRms = files[TCON].m[0].info['RepetitionTime']*1000
+    FApdw = files.pdw.m[0].info['FlipAngle']
+    FAt1w = files.t1w.m[0].info['FlipAngle']
+    NIIpdw = files.pdw.m[0].den_nii
+    NIIt1w = files.t1w.m[0].den_nii
+    cmd = f'fit-VFA \
+        --TR {TRms} \
+        --FA {FApdw},{FAt1w} \
+        --nworkers {os.cpu_count()} \
+        --B1 {b1map_smoothed} \
+        --mask {target_msk} \
+        --S0 {s0map} \
+        {NIIpdw} {NIIt1w} {t1map}'
+    subprocess.run(cmd, shell=True)
+    img_t1 = nib.load(t1map)
+    data_t1 = img_t1.get_fdata()
+    data_r1 = 1/data_t1
+    data_r1[data_r1<0 ] = 0
+    data_r1[data_r1>20] = 0
+    nib.save(nib.Nifti1Image(dataobj=data_r1, affine=img_t1.affine, header=img_t1.header), r1map)
+    
+
 #%% fit R2* // functions
 
 def fit_t2s_loglin_leastsquare(data: np.ndarray,
