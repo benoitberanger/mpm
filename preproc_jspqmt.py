@@ -3,15 +3,13 @@
 import nibabel as nib
 import numpy as np
 
-import logging, os, re, json, sys, enum, pathlib, shutil, subprocess
+import logging, os, re, json, enum, shutil, subprocess
+from pathlib import Path
 
 
 #%% Config
 
-main_dir = pathlib.Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM')
-
-path_size_pca = 5 # default value 5, while 7 is noisier
-rms_num_echos = 1 # use first echo, no need for RMS with 3 echos
+main_dir = Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM')
 
 JSPqMT: dict = {
     'MTw_TIMINGS':{
@@ -37,19 +35,23 @@ JSPqMT: dict = {
     }
 }
 
+target_contrast = 'mt0' # other contrast will be registered to this one, and QSM recon done on this one
+
+path_size_pca = 5 # default value 5, while 7 is noisier
+
 work_dir = main_dir / f'jspqmt_c9'
 regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9$')
 regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9$')
 regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9$')
 regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c9$')
 
-# work_dir = main_dir / f'jspqmt_c9_es_patch{path_size_pca}_rms{rms_num_echos}'
+# work_dir = main_dir / f'jspqmt_c9_es'
 # regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c9_es$')
 # regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c9_es$')
 # regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c9_es$')
 # regex_t1w = re.compile(r'.*vibeMT_t1w_sag_6eco_1iso_c9_es$')
 
-# work_dir = main_dir / f'jspqmt_c6_patch{path_size_pca}_rms{rms_num_echos}'
+# work_dir = main_dir / f'jspqmt_c6'
 # regex_mt0 = re.compile(r'.*vibeMT_mt0_sag_6eco_1iso_c6$')
 # regex_mtw = re.compile(r'.*vibeMT_mtw_sag_3eco_1iso_c6$')
 # regex_pdw = re.compile(r'.*vibeMT_pdw_sag_6eco_1iso_c6$')
@@ -110,21 +112,21 @@ class File:
     def moco_json(self): return self._moco_json
     
     @main_dir.setter
-    def main_dir (self, value): self._main_dir  = pathlib.Path(value)
+    def main_dir (self, value): self._main_dir  = Path(value)
     @root.setter
-    def root     (self, value): self._root      = pathlib.Path(value)
+    def root     (self, value): self._root      = Path(value)
     @raw_nii.setter
-    def raw_nii  (self, value): self._raw_nii   = pathlib.Path(value)
+    def raw_nii  (self, value): self._raw_nii   = Path(value)
     @raw_json.setter
-    def raw_json (self, value): self._raw_json  = pathlib.Path(value)
+    def raw_json (self, value): self._raw_json  = Path(value)
     @den_nii.setter
-    def den_nii  (self, value): self._den_nii   = pathlib.Path(value)
+    def den_nii  (self, value): self._den_nii   = Path(value)
     @den_json.setter
-    def den_json (self, value): self._den_json  = pathlib.Path(value)
+    def den_json (self, value): self._den_json  = Path(value)
     @moco_nii.setter
-    def moco_nii (self, value): self._moco_nii  = pathlib.Path(value)
+    def moco_nii (self, value): self._moco_nii  = Path(value)
     @moco_json.setter
-    def moco_json(self, value): self._moco_json = pathlib.Path(value)
+    def moco_json(self, value): self._moco_json = Path(value)
 
 
 class ContrastMP:
@@ -160,14 +162,12 @@ work_dir.mkdir(parents=True, exist_ok=True)
 logger.info(f'work_dir is : {work_dir}')
 
 denoising_dir = work_dir / '01_Denoising'
-rms_dir       = work_dir / '02_RMS'
-masking_dir   = work_dir / '03_Masking'
-moco_dir      = work_dir / '04_MotionCorrection'
-b1map_dir     = work_dir / '05_B1map'
-r2s_dir       = work_dir / '06_R2s'
-qsm_dir       = work_dir / '07_QSM'
+masking_dir   = work_dir / '02_Masking'
+moco_dir      = work_dir / '03_MotionCorrection'
+b1map_dir     = work_dir / '04_B1map'
+r2s_dir       = work_dir / '05_R2s'
+qsm_dir       = work_dir / '06_QSM'
 denoising_dir.mkdir(parents=True, exist_ok=True)
-rms_dir      .mkdir(parents=True, exist_ok=True)
 masking_dir  .mkdir(parents=True, exist_ok=True)
 moco_dir     .mkdir(parents=True, exist_ok=True)
 b1map_dir    .mkdir(parents=True, exist_ok=True)
@@ -203,7 +203,7 @@ for root, dirs, files in os.walk(main_dir):
                 if regex_mtw.match(root): new.contrast = Contrast.mtw
                 if regex_pdw.match(root): new.contrast = Contrast.pdw
                 if regex_t1w.match(root): new.contrast = Contrast.t1w
-                new.den_nii = denoising_dir /  f'den_{new.contrast}_e{new.echo_number}_{mp}.nii'
+                new.den_nii = denoising_dir /  f'den_{new.contrast}_e{new.echo_number:02d}_{mp}.nii'
                 new.den_json = new.den_nii.with_suffix('.json')
                 new.moco_nii = moco_dir / f'moco_{new.den_nii.name}'
                 new.moco_json = new.moco_nii.with_suffix('.json')
@@ -212,8 +212,8 @@ for root, dirs, files in os.walk(main_dir):
                 new.is_b1map = True
                 raw_sources.append(new)
 
-raw_mag   = list(filter(lambda x: x.is_mag==True , raw_sources))
-raw_pha   = list(filter(lambda x: x.is_mag==False, raw_sources))
+raw_mag = list(filter(lambda x: x.is_mag==True , raw_sources))
+raw_pha = list(filter(lambda x: x.is_mag==False, raw_sources))
 files = MPMContainer()
 for con in Contrast:
     files[con].m = list(filter(lambda x: x.contrast==con, raw_mag))
@@ -224,13 +224,17 @@ for con in Contrast:
     if len(files[con].p) < 1: raise FileNotFoundError(f'{con} // phase     not found with {main_dir / regex_mt0.pattern / regex_rawnifti.pattern}')
     logger.info(f'{con} // found {len(files[con].m)} magnitudes')
     logger.info(f'{con} // found {len(files[con].p)} phases')
-    if len(files[con].m) < rms_num_echos: raise ValueError(f'{con} // not enough echos for RMS: {len(files[con].m)}/{rms_num_echos}')
     logger.info(f'{con} // sorted TE = {[round(file.echo_time*1000,3) for file in files[con].m]}(ms)')
 
 raw_b1map: list[File] = list(filter(lambda x: x.is_b1map==True, raw_sources))
 if len(raw_b1map) < 1: raise FileNotFoundError(f'no raw_b1map found with {main_dir / regex_b1map.pattern / regex_rawnifti.pattern}')
 if len(raw_b1map) > 1: raise FileNotFoundError(f'too many raw_b1map found with {main_dir / regex_b1map.pattern / regex_rawnifti.pattern}')
 raw_b1map: File = raw_b1map[0]
+
+
+#%% Set target_contrast
+
+TCON = target_contrast # just an alias
 
 
 #%% Prepare some containers and shortcuts
@@ -246,7 +250,7 @@ for con in Contrast:
 
 mask_4D = denoising_dir / 'mask_4D.nii'
 if not mask_4D.exists():
-    con_masks = []
+    con_masks: list[str] = []
     for con in Contrast:
         input = files[con].m[0].raw_nii
         mask  = denoising_dir / f'mask_{con}.nii'
@@ -389,37 +393,16 @@ for idx in range(len(files)):
         logger.info(f'Writing MAG {fileorder_4D_m[idx].den_nii.stem}[.nii, .json]'); nib.save(img_den_m, fileorder_4D_m[idx].den_nii); shutil.copyfile(fileorder_4D_m[idx].raw_json,fileorder_4D_m[idx].den_json)
 
 
-
-#%% Root Mean Square of the first echos
-
-for con in Contrast:
-    fpath = rms_dir / f'den_{con}_rms.nii'
-    if fpath.exists():
-        logger.info(f'Already exist: {fpath}')
-    else:
-        file_stack = files[con].m
-        file_stack = file_stack[:rms_num_echos]
-        img_stack = [nib.load(file.root / file.den_nii) for file in file_stack]
-        data_stack = np.stack([img.get_fdata() for img in img_stack], axis=3)
-        rms = np.sqrt(np.mean(np.square(data_stack),axis=3))
-        img_rms = nib.Nifti1Image(
-            dataobj=rms,
-            affine=img_stack[0].affine,
-            header=img_stack[0].header)
-        logger.info(f'Writing {fpath}')
-        nib.save(img_rms, fpath)
-
-
 #%% Masking
 
 for con in Contrast:
-    input = rms_dir / f'den_{con}_rms.nii'
-    mask_raw  = masking_dir / f'mask_den_{con}_rms_raw.nii'
+    den_con_e01 = files[con].m[0].den_nii
+    mask_raw    = masking_dir / f'mask_{den_con_e01.stem}_raw.nii'
     if mask_raw.exists():
         logger.info(f'Already exist: {mask_raw}')
     else:
-        subprocess.run(f'mri_synthstrip --image {fpath} --mask {mask_raw} --border 2', shell=True)
-    mask_clean  = masking_dir / f'mask_den_{con}_rms_clean.nii'
+        subprocess.run(f'mri_synthstrip --image {den_con_e01} --mask {mask_raw} --border 2', shell=True)
+    mask_clean  = mask_raw.with_name(mask_raw.name.replace('_raw.nii','_clean.nii'))
     if mask_clean.exists():
         logger.info(f'Already exist: {mask_clean}')
     else:
@@ -433,17 +416,29 @@ for con in Contrast:
         subprocess.run(cmd, shell=True)
 
 
+#%% Prepare result mask
+
+target_img = files[con].m[0].den_nii
+target_msk = masking_dir / f'mask_{target_img.stem}_clean.nii'
+
+result_mask = results_dir / 'mask.nii'
+if not result_mask.exists():
+    result_mask.symlink_to(target_msk)
+
 
 #%% Motion correction
-        
-target_img = rms_dir     /      'den_mt0_rms.nii'
-target_msk = masking_dir / 'mask_den_mt0_rms_clean.nii'
+
 
 for con in Contrast:
-    if con is Contrast.mt0: continue
+    if con == TCON:
+        for file in files[TCON].m:
+            if not file.moco_nii.exists():
+                file.moco_nii .symlink_to(file.den_nii )
+                file.moco_json.symlink_to(file.den_json)
+        continue
     
-    moving_img = rms_dir     /      f'den_{con}_rms.nii'
-    moving_msk = masking_dir / f'mask_den_{con}_rms_clean.nii'
+    moving_img = files[con].m[0].den_nii
+    moving_msk = masking_dir / f'mask_{moving_img.stem}_clean.nii'
 
     mat = moco_dir / f'ants_{con}_0GenericAffine.mat'
     if not mat.exists():
@@ -466,23 +461,10 @@ for con in Contrast:
 
         subprocess.run(cmd, shell=True)
 
-    moco_img = moco_dir / f'moco_den_{con}_rms.nii'
-    if not moco_img.exists():
-        logger.info(f'antsApplyTransforms {con} -> mt0 : {moco_img}')
-        cmd = f'antsApplyTransforms \
-                --dimensionality 3 \
-                --interpolation LanczosWindowedSinc \
-                --input {moving_img}\
-                --reference-image {moving_img} \
-                --transform {mat} \
-                --output {moco_img}'
-        subprocess.run(cmd, shell=True)
-
     n_echo = len(files[con])
-
     for echo in range(1,n_echo+1):
-        file_in  = denoising_dir /      f'den_{con}_e{echo}_m.nii'
-        file_out = moco_dir      / f'moco_den_{con}_e{echo}_m.nii'
+        file_in  = denoising_dir /      f'den_{con}_e{echo:02d}_m.nii'
+        file_out = moco_dir      / f'moco_den_{con}_e{echo:02d}_m.nii'
         if not file_out.exists():
             logger.info(f'antsApplyTransforms {con} -> mt0 : {file_out}')
             cmd = f'antsApplyTransforms \
@@ -519,10 +501,10 @@ else:
 
 #%% Fit
 
-mt0 = rms_dir     /      'den_mt0_rms.nii'
-mtw = moco_dir    / 'moco_den_mtw_rms.nii'
-pdw = moco_dir    / 'moco_den_pdw_rms.nii'
-t1w = moco_dir    / 'moco_den_t1w_rms.nii'
+mt0 = moco_dir    / 'moco_den_mt0_e01_m.nii'
+mtw = moco_dir    / 'moco_den_mtw_e01_m.nii'
+pdw = moco_dir    / 'moco_den_pdw_e01_m.nii'
+t1w = moco_dir    / 'moco_den_t1w_e01_m.nii'
 mpf = results_dir / 'mpf.nii'
 t1f = results_dir / 't1f.nii'
 r1f = results_dir / 'r1f.nii'
@@ -745,20 +727,12 @@ else:
     imgs = MPMContainer()
     data = MPMContainer()
     te   = MPMContainer()
-    imgs.mt0.m = [nib.load(file.root / file. den_nii) for file in files.mt0.m]
-    imgs.mtw.m = [nib.load(file.root / file.moco_nii) for file in files.mtw.m]
-    imgs.pdw.m = [nib.load(file.root / file.moco_nii) for file in files.pdw.m]
-    imgs.t1w.m = [nib.load(file.root / file.moco_nii) for file in files.t1w.m]
-    data.mt0.m = np.stack([img.get_fdata() for img in imgs.mt0.m], axis=3)
-    data.mtw.m = np.stack([img.get_fdata() for img in imgs.mtw.m], axis=3)
-    data.pdw.m = np.stack([img.get_fdata() for img in imgs.pdw.m], axis=3)
-    data.t1w.m = np.stack([img.get_fdata() for img in imgs.t1w.m], axis=3)
-    te.mt0.m = np.array([file.echo_time for file in files.mt0.m])
-    te.mtw.m = np.array([file.echo_time for file in files.mtw.m])
-    te.pdw.m = np.array([file.echo_time for file in files.pdw.m])
-    te.t1w.m = np.array([file.echo_time for file in files.t1w.m])
-    affine = imgs.mtw.m[0].affine
-    header = imgs.mtw.m[0].header
+    for con in Contrast:
+        imgs[con].m = [nib.load(file.root / file.moco_nii) for file in files[con].m]
+        data[con].m = np.stack([img.get_fdata() for img in imgs[con].m], axis=3)
+        te  [con].m = np.array([file.echo_time for file in files[con].m])
+    affine = imgs[TCON].m[0].affine
+    header = imgs[TCON].m[0].header
 
     s0_mt0, s0_mtw, s0_pdw, s0_t1w, t2s, r2s, err = fit_t2s_estatics(
         data_mt0=data.mt0.m, data_mtw=data.mtw.m, data_pdw=data.pdw.m, data_t1w=data.t1w.m,
@@ -787,21 +761,21 @@ for con in Contrast:
         logger.info(f'R2s **single contrast** fits for {con}')
         mask = nib.load(target_msk).get_fdata()
 
-        if   con is Contrast.mt0: imgs = [nib.load(file.root / file. den_nii) for file in files.mt0.m]; te = np.array([file.echo_time for file in files.mt0.m])
-        elif con is Contrast.mtw: imgs = [nib.load(file.root / file.moco_nii) for file in files.mtw.m]; te = np.array([file.echo_time for file in files.mtw.m])
-        elif con is Contrast.pdw: imgs = [nib.load(file.root / file.moco_nii) for file in files.pdw.m]; te = np.array([file.echo_time for file in files.pdw.m])
-        elif con is Contrast.t1w: imgs = [nib.load(file.root / file.moco_nii) for file in files.t1w.m]; te = np.array([file.echo_time for file in files.t1w.m])
+        imgs = [nib.load(file.root / file.moco_nii) for file in files[con].m]
         data = np.stack([img.get_fdata() for img in imgs], axis=3)
+        te   = np.array([file.echo_time for file in files[con].m])
+        affine = imgs[0].affine
+        header = imgs[0].header
 
         s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data, te, mask, 'ols')
-        nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_ols.nii')
-        nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_ols.nii')
-        nib.save(nib.Nifti1Image(dataobj=s0 , affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir /  f's0_{con}_ols.nii')
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f'r2s_{con}_ols.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f't2s_{con}_ols.nii')
+        nib.save(nib.Nifti1Image(dataobj=s0 , affine=affine, header=header, dtype=np.float32), r2s_dir /  f's0_{con}_ols.nii')
 
         s0, t2s, r2s, err = fit_t2s_loglin_leastsquare(data, te, mask, 'wls')
-        nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_wls.nii')
-        nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_wls.nii')
-        nib.save(nib.Nifti1Image(dataobj=s0 , affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir /  f's0_{con}_wls.nii')
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f'r2s_{con}_wls.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f't2s_{con}_wls.nii')
+        nib.save(nib.Nifti1Image(dataobj=s0 , affine=affine, header=header, dtype=np.float32), r2s_dir /  f's0_{con}_wls.nii')
 
         with np.errstate(divide='ignore',invalid='ignore'): 
             t2s = (te[-1]-te[0]) / (2*(len(te)-1)) \
@@ -813,12 +787,12 @@ for con in Contrast:
         t2s[t2s>1]    = 0
         r2s[r2s<0]    = 0
         r2s[r2s>1000] = 0
-        nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_numart.nii')
-        nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_numart.nii')
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f'r2s_{con}_numart.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f't2s_{con}_numart.nii')
 
         t2s, r2s = fit_t2s_arlo(data, te, mask)
-        nib.save(nib.Nifti1Image(dataobj=r2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f'r2s_{con}_arlo.nii')
-        nib.save(nib.Nifti1Image(dataobj=t2s, affine=imgs[0].affine, header=imgs[0].header, dtype=np.float32), r2s_dir / f't2s_{con}_arlo.nii')
+        nib.save(nib.Nifti1Image(dataobj=r2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f'r2s_{con}_arlo.nii')
+        nib.save(nib.Nifti1Image(dataobj=t2s, affine=affine, header=header, dtype=np.float32), r2s_dir / f't2s_{con}_arlo.nii')
         logger.info(f'Wrote on disk all R2s **single contrast** fits for {con}')
 
 
@@ -858,6 +832,7 @@ else:
 
 
 qsm_mask = qsm_dir / 'mask.nii'
+resulat_qsm_mask = results_dir / 'qsm_mask.nii'
 if qsm_mask.exists():
     logger.info(f'Already exist: {qsm_mask}')
 else:
@@ -868,6 +843,7 @@ else:
             --output {qsm_mask} \
             hd-bet {den_mag4D_rms}'
     subprocess.run(cmd, shell=True)
+    resulat_qsm_mask.symlink_to(qsm_mask)
 
 
 #%% QSM
@@ -907,7 +883,7 @@ else:
             {localfield}'
     subprocess.run(cmd, shell=True)
 
-qsm_map = results_dir / 'qsm.nii'
+qsm_map = results_dir / 'qsm_lpcnn.nii'
 if qsm_map.exists():
     logger.info(f'Already exist: {qsm_map}')
 else:
@@ -916,3 +892,4 @@ else:
             --output {qsm_map} \
             {localfield}'
     subprocess.run(cmd, shell=True)
+
