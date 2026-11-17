@@ -415,7 +415,7 @@ for con in Contrast:
 
 #%% Prepare result mask
 
-target_img = files[con].m[0].den_nii
+target_img = files[TCON].m[0].den_nii
 target_msk = masking_dir / f'mask_{target_img.stem}_clean.nii'
 
 result_mask = results_dir / 'mask.nii'
@@ -439,7 +439,7 @@ for con in Contrast:
 
     mat = moco_dir / f'ants_{con}_0GenericAffine.mat'
     if not mat.exists():
-        logger.info(f'antsRegistration {con} -> mt0 : {moving_img}')
+        logger.info(f'antsRegistration {con} -> {TCON} : {moving_img}')
 
         cmd = f'antsRegistration \
                 --dimensionality 3 \
@@ -452,9 +452,9 @@ for con in Contrast:
                 --interpolation LanczosWindowedSinc \
                 --transform Rigid[0.1] \
                 --metric MI[{target_img},{moving_img},1,32,Regular,0.25] \
-                --convergence [500x200,1e-6,10] \
-                --shrink-factors   2x1 \
-                --smoothing-sigmas 1x0vox'
+                --convergence [500x500x500x200,1e-6,10] \
+                --shrink-factors   4x2x2x1 \
+                --smoothing-sigmas 4x2x1x0'
 
         subprocess.run(cmd, shell=True)
 
@@ -463,7 +463,7 @@ for con in Contrast:
         file_in  = denoising_dir /      f'den_{con}_e{echo:02d}_m.nii'
         file_out = moco_dir      / f'moco_den_{con}_e{echo:02d}_m.nii'
         if not file_out.exists():
-            logger.info(f'antsApplyTransforms {con} -> mt0 : {file_out}')
+            logger.info(f'antsApplyTransforms {con} -> {TCON} : {file_out}')
             cmd = f'antsApplyTransforms \
                     --dimensionality 3 \
                     --interpolation LanczosWindowedSinc \
