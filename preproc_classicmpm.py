@@ -9,7 +9,8 @@ from pathlib import Path
 
 #%% Config
 
-main_dir = Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM')
+#main_dir = Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_07_30_DEV2_444_09_compareMPM')
+main_dir = Path('/network/iss/cenir/analyse/irm/users/benoit.beranger/2026_05_29_DEV2_476_01_NEUROPREMS7T')
 
 target_contrast = 't1w' # other contrast will be registered to this one, and QSM recon done on this one
 
@@ -21,15 +22,23 @@ path_size_pca = 5 # default value 5, while 7 is noisier
 # regex_pdw = re.compile(r'.*MPM_PDw_good$')
 # regex_t1w = re.compile(r'.*MPM_T1w_good$')
 
+# SatPulseDuration: float = 10.240 # MT preparation module duration (ms)
+# work_dir = main_dir / f'classcicmpm_fast'
+# regex_mtw = re.compile(r'.*MPM_MTw_fast$')
+# regex_pdw = re.compile(r'.*MPM_PDw_fast$')
+# regex_t1w = re.compile(r'.*MPM_T1w_fast$')
+
 SatPulseDuration: float = 10.240 # MT preparation module duration (ms)
-work_dir = main_dir / f'classcicmpm_fast'
-regex_mtw = re.compile(r'.*MPM_MTw_fast$')
-regex_pdw = re.compile(r'.*MPM_PDw_fast$')
-regex_t1w = re.compile(r'.*MPM_T1w_fast$')
+work_dir = main_dir / f'classcicmpm_7T'
+regex_mtw = re.compile(r'.*ep3d_MPM_0p6mm_MTw$')
+regex_pdw = re.compile(r'.*ep3d_MPM_0p6mm_PDw$')
+regex_t1w = re.compile(r'.*ep3d_MPM_0p6mm_T1w$')
 
 regex_rawnifti  = re.compile(r'^v_.*nii$')
 
-regex_b1map = re.compile(r'.*b1map_3DREAM_relB1$')
+# regex_b1map = re.compile(r'.*b1map_3DREAM_relB1$')
+# b1map_factor: float = 1/1000
+regex_b1map = re.compile(r'.*dzneH7_afi_B1_4iso_relB1$')
 b1map_factor: float = 1/1000
 
 
@@ -382,7 +391,7 @@ for con in Contrast:
 
 #%% Prepare result mask
 
-target_img = files[con].m[0].den_nii
+target_img = files[TCON].m[0].den_nii
 target_msk = masking_dir / f'mask_{target_img.stem}_clean.nii'
 
 result_mask = results_dir / 'mask.nii'
@@ -406,7 +415,7 @@ for con in Contrast:
 
     mat = moco_dir / f'ants_{con}_0GenericAffine.mat'
     if not mat.exists():
-        logger.info(f'antsRegistration {con} -> mt0 : {moving_img}')
+        logger.info(f'antsRegistration {con} -> {TCON} : {moving_img}')
 
         cmd = f'antsRegistration \
                 --dimensionality 3 \
@@ -419,9 +428,9 @@ for con in Contrast:
                 --interpolation LanczosWindowedSinc \
                 --transform Rigid[0.1] \
                 --metric MI[{target_img},{moving_img},1,32,Regular,0.25] \
-                --convergence [500x200,1e-6,10] \
-                --shrink-factors   2x1 \
-                --smoothing-sigmas 1x0vox'
+                --convergence [500x500x500x200,1e-6,10] \
+                --shrink-factors   4x2x2x1 \
+                --smoothing-sigmas 4x2x1x0'
 
         subprocess.run(cmd, shell=True)
 
@@ -430,7 +439,7 @@ for con in Contrast:
         file_in  = denoising_dir /      f'den_{con}_e{echo:02d}_m.nii'
         file_out = moco_dir      / f'moco_den_{con}_e{echo:02d}_m.nii'
         if not file_out.exists():
-            logger.info(f'antsApplyTransforms {con} -> mt0 : {file_out}')
+            logger.info(f'antsApplyTransforms {con} -> {TCON} : {file_out}')
             cmd = f'antsApplyTransforms \
                     --dimensionality 3 \
                     --interpolation LanczosWindowedSinc \
@@ -525,7 +534,19 @@ if not t1map.exists():
     nib.save(nib.Nifti1Image(dataobj=data_r1, affine=img_t1.affine, header=img_t1.header), r1map)
 
 mtsat = results_dir / 'mtsat.nii'
-if not mtsat.exists():
+TRpdw = files.pdw.m[0].info['RepetitionTime']*1000
+TRmtw = files.mtw.m[0].info['RepetitionTime']*1000
+FApdw = files.pdw.m[0].info['FlipAngle']
+FAmtw = files.pdw.m[0].info['FlipAngle']
+avail_mtsat: bool = True
+if abs(TRpdw - TRmtw) > 0.1:
+    logger.error(f'TRpdw={TRpdw} and TRmtw={TRmtw} are different')
+    avail_mtsat = False
+if abs(FApdw - FAmtw) > 0.1:
+    logger.error(f'FApdw={FApdw} and FAmtw={FAmtw} are different')
+    avail_mtsat = False
+
+if avail_mtsat and not mtsat.exists():
     mt4D = moco_dir / 'mt4D.nii'
     if not mt4D.exists():
         pdw = files.pdw.m[0].moco_nii
@@ -538,12 +559,7 @@ if not mtsat.exists():
         img_mt = nib.Nifti1Image(dataobj=data_mt, affine=img_mtw.affine, header=img_mtw.header)
         img_mt.header['dim'][0] = 4
         logger.info(f'Writing raw MT0/MTw 4D images in disk: {mt4D}'); nib.save(img_mt, mt4D)
-    TRpdw = files.pdw.m[0].info['RepetitionTime']*1000
-    TRmtw = files.mtw.m[0].info['RepetitionTime']*1000
-    FApdw = files.pdw.m[0].info['FlipAngle']
-    FAmtw = files.pdw.m[0].info['FlipAngle']
-    if abs(TRpdw - TRmtw) > 0.1: raise ValueError(f'TRpdw={TRpdw} and TRmtw={TRmtw} are different')
-    if abs(FApdw - FAmtw) > 0.1: raise ValueError(f'FApdw={FApdw} and FAmtw={FAmtw} are different')
+
     SEQparx = f'{SatPulseDuration},{TRmtw},{FAmtw}'
     cmd = f'fit-MTsat \
         --nworkers {os.cpu_count()} \
