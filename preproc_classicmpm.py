@@ -15,10 +15,17 @@ target_contrast = 't1w' # other contrast will be registered to this one, and QSM
 
 path_size_pca = 5 # default value 5, while 7 is noisier
 
-work_dir = main_dir / f'classcicmpm_good'
-regex_mtw = re.compile(r'.*MPM_MTw_good$')
-regex_pdw = re.compile(r'.*MPM_PDw_good$')
-regex_t1w = re.compile(r'.*MPM_T1w_good$')
+# SatPulseDuration: float = 10.240 # MT preparation module duration (ms)
+# work_dir = main_dir / f'classcicmpm_good'
+# regex_mtw = re.compile(r'.*MPM_MTw_good$')
+# regex_pdw = re.compile(r'.*MPM_PDw_good$')
+# regex_t1w = re.compile(r'.*MPM_T1w_good$')
+
+SatPulseDuration: float = 10.240 # MT preparation module duration (ms)
+work_dir = main_dir / f'classcicmpm_fast'
+regex_mtw = re.compile(r'.*MPM_MTw_fast$')
+regex_pdw = re.compile(r'.*MPM_PDw_fast$')
+regex_t1w = re.compile(r'.*MPM_T1w_fast$')
 
 regex_rawnifti  = re.compile(r'^v_.*nii$')
 
@@ -499,8 +506,8 @@ if not t1map.exists():
     TRms = files[TCON].m[0].info['RepetitionTime']*1000
     FApdw = files.pdw.m[0].info['FlipAngle']
     FAt1w = files.t1w.m[0].info['FlipAngle']
-    NIIpdw = files.pdw.m[0].den_nii
-    NIIt1w = files.t1w.m[0].den_nii
+    NIIpdw = files.pdw.m[0].moco_nii
+    NIIt1w = files.t1w.m[0].moco_nii
     cmd = f'fit-VFA \
         --TR {TRms} \
         --FA {FApdw},{FAt1w} \
@@ -512,11 +519,39 @@ if not t1map.exists():
     subprocess.run(cmd, shell=True)
     img_t1 = nib.load(t1map)
     data_t1 = img_t1.get_fdata()
-    data_r1 = 1/data_t1
+    with np.errstate(divide='ignore',invalid='ignore'):  data_r1 = 1/data_t1
     data_r1[data_r1<0 ] = 0
     data_r1[data_r1>20] = 0
     nib.save(nib.Nifti1Image(dataobj=data_r1, affine=img_t1.affine, header=img_t1.header), r1map)
-    
+
+mtsat = results_dir / 'mtsat.nii'
+if not mtsat.exists():
+    mt4D = moco_dir / 'mt4D.nii'
+    if not mt4D.exists():
+        pdw = files.pdw.m[0].moco_nii
+        mtw = files.mtw.m[0].moco_nii
+        img_pdw = nib.load(pdw)
+        img_mtw = nib.load(mtw)
+        data_pwd = img_pdw.get_fdata()
+        data_mtw = img_mtw.get_fdata()
+        data_mt = np.stack((data_pwd, data_mtw), axis=3)
+        img_mt = nib.Nifti1Image(dataobj=data_mt, affine=img_mtw.affine, header=img_mtw.header)
+        img_mt.header['dim'][0] = 4
+        logger.info(f'Writing raw MT0/MTw 4D images in disk: {mt4D}'); nib.save(img_mt, mt4D)
+    TRpdw = files.pdw.m[0].info['RepetitionTime']*1000
+    TRmtw = files.mtw.m[0].info['RepetitionTime']*1000
+    FApdw = files.pdw.m[0].info['FlipAngle']
+    FAmtw = files.pdw.m[0].info['FlipAngle']
+    if abs(TRpdw - TRmtw) > 0.1: raise ValueError(f'TRpdw={TRpdw} and TRmtw={TRmtw} are different')
+    if abs(FApdw - FAmtw) > 0.1: raise ValueError(f'FApdw={FApdw} and FAmtw={FAmtw} are different')
+    SEQparx = f'{SatPulseDuration},{TRmtw},{FAmtw}'
+    cmd = f'fit-MTsat \
+        --nworkers {os.cpu_count()} \
+        --B1 {b1map_smoothed} \
+        --mask {target_msk} \
+        {mt4D} {t1map} {mtsat} {SEQparx}'
+    subprocess.run(cmd, shell=True)
+
 
 #%% fit R2* // functions
 
