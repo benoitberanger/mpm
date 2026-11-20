@@ -793,7 +793,7 @@ for con in Contrast:
         logger.info(f'Wrote on disk all R2s **single contrast** fits for {con}')
 
 
-#%% Extract 4D magnitude and phase from complex denoising, on the target contrast (mt0)
+#%% Extract 4D magnitude and phase from complex denoising, on the target contrast
         
 den_mag4D = qsm_dir / 'den_mag4D.nii'
 den_pha4D = qsm_dir / 'den_pha4D.nii'
@@ -801,16 +801,37 @@ if den_pha4D.exists():
     logger.info(f'Already exist: {den_pha4D}')
 else:
     img_den_c = nib.load(path_4D_den_cx)
+    affine = img_den_c.affine
+    header = img_den_c.header
     data_den_c = img_den_c.get_fdata(dtype=np.complex64)
     data_c = data_den_c[:,:,:, :len(files[TCON])]
-    img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
-    img_den_p = nib.Nifti1Image(dataobj=np.angle(data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
+    img_den_m = nib.Nifti1Image(dataobj=np.abs  (data_c), affine=affine, header=header, dtype=np.float32)
+    img_den_p = nib.Nifti1Image(dataobj=np.angle(data_c), affine=affine, header=header, dtype=np.float32)
     logger.info(f'Writing denoised 4D mag : {den_mag4D}'); nib.save(img_den_m, den_mag4D)
     logger.info(f'Writing denoised 4D pha : {den_pha4D}'); nib.save(img_den_p, den_pha4D)
 
     # diff_data_c = np.diff(data_c, axis=3)
     # img_diff = nib.Nifti1Image(dataobj=np.angle(diff_data_c), affine=img_den_c.affine, header=img_den_c.header, dtype=np.float32)
     # nib.save(img_diff, qsm_dir / 'phase_complex_diff.nii')
+
+#%% SWI
+    
+tes = ' '.join([str(file.echo_time) for file in files[TCON].m])
+b0 = files[TCON].m[0].info['MagneticFieldStrength']
+
+swi = qsm_dir / 'swi.nii'
+if swi.exists():
+    logger.info(f'Already exist: {swi}')
+else:
+    str_mag:str = ' '.join([str(file.raw_nii) for file in files[TCON].m])
+    str_pha:str = ' '.join([str(file.raw_nii) for file in files[TCON].p])
+    cmd = f'qsmxt swi \
+            --tes {tes} \
+            --magnitude {str_mag} \
+            --phase     {str_pha} \
+            --mip \
+            --output {swi}'
+    subprocess.run(cmd, shell=True)
 
 
 #%% Generate mask for QSM
@@ -849,8 +870,6 @@ fieldmap = qsm_dir / 'fieldmap.nii'
 if fieldmap.exists():
     logger.info(f'Already exist: {fieldmap}')
 else:
-    tes = ' '.join([str(file.echo_time) for file in files[TCON].m])
-    b0 = files[TCON].m[0].info['MagneticFieldStrength']
     cmd = f'qsmxt fieldmap laplacian \
             --tes {tes} \
             --b0 {b0} \
@@ -870,23 +889,37 @@ else:
             {fieldmap}'
     subprocess.run(cmd, shell=True)
 
-qsm_qc_map = qsm_dir / 'qsm_ilsqr.nii'
-if qsm_qc_map.exists():
-    logger.info(f'Already exist: {qsm_qc_map}')
+qsm_ilsqr = qsm_dir / 'qsm_ilsqr.nii'
+if qsm_ilsqr.exists():
+    logger.info(f'Already exist: {qsm_ilsqr}')
 else:
     cmd = f'qsmxt invert ilsqr \
             --mask {qsm_mask}\
-            --output {qsm_qc_map} \
+            --output {qsm_ilsqr} \
             {localfield}'
     subprocess.run(cmd, shell=True)
 
-qsm_map = results_dir / 'qsm_lpcnn.nii'
-if qsm_map.exists():
-    logger.info(f'Already exist: {qsm_map}')
+
+qsm_medi = qsm_dir / 'qsm_medi.nii'
+if qsm_medi.exists():
+    logger.info(f'Already exist: {qsm_medi}')
+else:
+    cmd = f'qsmxt invert medi \
+            --magnitude {den_mag4D} \
+		    --echo-times {tes} \
+		    --field-strength {b0} \
+            --mask {qsm_mask}\
+            --output {qsm_medi} \
+            {localfield}'
+    subprocess.run(cmd, shell=True)
+
+qsm_lpcnn = results_dir / 'qsm_lpcnn.nii'
+if qsm_lpcnn.exists():
+    logger.info(f'Already exist: {qsm_lpcnn}')
 else:
     cmd = f'qsmxt invert lpcnn \
             --mask {qsm_mask}\
-            --output {qsm_map} \
+            --output {qsm_lpcnn} \
             {localfield}'
     subprocess.run(cmd, shell=True)
 
